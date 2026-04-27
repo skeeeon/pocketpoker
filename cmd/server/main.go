@@ -10,6 +10,7 @@ import (
 
 	_ "pocketpoker/pb_migrations"
 	"pocketpoker/server"
+	"pocketpoker/web"
 )
 
 func main() {
@@ -25,7 +26,7 @@ func main() {
 		Dir:         "pb_migrations",
 	})
 
-	server.RegisterRoutes(app)
+	server.RegisterRoutes(app, web.Dist())
 
 	if err := app.Start(); err != nil {
 		log.Fatal(err)

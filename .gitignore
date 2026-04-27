@@ -8,7 +8,8 @@
 
 # Node / Vite
 /web/node_modules/
-/web/dist/
+/web/dist/*
+!/web/dist/.gitkeep
 /web/.vite/
 /web/*.local
 

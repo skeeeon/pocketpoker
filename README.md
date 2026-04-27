@@ -2,7 +2,8 @@
 
 A private friend-group poker app supporting Hold'em, Omaha, and six custom
 variants. The server is a single Go binary that imports PocketBase as a
-library; the frontend is a Vue 3 SPA served from the same process.
+library and embeds the built Vue 3 SPA via `go:embed`, so deployment is
+one binary and a `pb_data/` directory.
 
 Built for trust-based play among friends — server is authoritative, no
 real money, no anti-cheat surface beyond standard auth.
@@ -78,9 +79,8 @@ flat until a single file actually starts hurting.
 ### First-time setup
 
 ```bash
-# Backend: pull deps and build the binary.
+# Backend: pull deps.
 go mod download
-go build -o server.exe ./cmd/server
 
 # Frontend: install npm deps.
 cd web && npm install
@@ -94,12 +94,32 @@ Open two terminals.
 # Terminal 1 — Go server (runs PB on :8090, applies migrations on boot).
 ./server.exe serve
 
-# Terminal 2 — Vite dev server with HMR (proxies API to :8090 in dev).
+# Terminal 2 — Vite dev server with HMR (typically http://localhost:5173).
 cd web && npm run dev
 ```
 
-The Vite dev server typically lands on `http://localhost:5173`.
+In dev, hit Vite at `http://localhost:5173` for HMR; the SPA talks to
+PocketBase on `:8090` via the JS SDK directly (no proxy). The embedded
+SPA inside the Go binary is only relevant for production-style runs
+(see below).
+
 PocketBase's admin UI is at `http://localhost:8090/_/`.
+
+### Production-style build
+
+The Vite output (`web/dist/`) is embedded into the Go binary via
+`go:embed`, so `npm run build` must run **before** `go build`:
+
+```bash
+cd web && npm run build && cd ..
+go build -o server.exe ./cmd/server
+./server.exe serve   # serves the SPA at http://localhost:8090/
+```
+
+`web/dist/.gitkeep` is committed (driven by `web/public/.gitkeep`)
+so a fresh clone can `go build` without first running the frontend
+build — you'll just get an empty SPA bundle, which is fine for
+backend-only work.
 
 ### First-run admin
 
