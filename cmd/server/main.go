@@ -27,6 +27,7 @@ func main() {
 	})
 
 	server.RegisterRoutes(app, web.Dist())
+	server.RegisterUsersHooks(app)
 
 	if err := app.Start(); err != nil {
 		log.Fatal(err)

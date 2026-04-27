@@ -6,6 +6,7 @@ import { useAuth } from '../composables/useAuth'
 import { useTable } from '../composables/useTable'
 import { usePlayerHand } from '../composables/usePlayerHand'
 import { useVariants, variantRuleSummary, type Variant } from '../composables/useVariants'
+import UserAvatar from '../components/UserAvatar.vue'
 
 const props = defineProps<{ id: string }>()
 const router = useRouter()
@@ -301,6 +302,21 @@ function isCurrentActor(seatNum: number): boolean {
   return hand.value ? hand.value.current_actor_seat === seatNum && !isHandComplete.value : false
 }
 
+// Whether this seat belongs to the signed-in user. Drives the "you"
+// styling on the seat tile and is_me-based affordances.
+function seatIsMine(seatNum: number): boolean {
+  const u = userBySeat.value[seatNum]
+  return !!u && user.value?.id === u.id
+}
+
+// Whether this seat will deal the next hand. Used to surface a hint
+// between hands so players know who they're waiting on without
+// reading the controls strip.
+function isNextDealer(seatNum: number): boolean {
+  if (hand.value && !isHandComplete.value) return false
+  return nextDealerSeat.value === seatNum
+}
+
 function winnerInfo(seatNum: number) {
   if (!hand.value?.winner_seats) return null
   return hand.value.winner_seats.find((w) => w.seat === seatNum) ?? null
@@ -331,12 +347,22 @@ function isCardChosenForSeat(seatNum: number, card: string): boolean {
   return w.cards.includes(card)
 }
 
+// Plain display name for a seat — no "(you)" suffix because the seat
+// tile gets its own visual self-indicator. Falls back to email, then
+// to a short id slice, then to the literal "seat N" placeholder.
+function seatName(seatNum: number): string {
+  const u = userBySeat.value[seatNum]
+  if (!u) return `seat ${seatNum}`
+  return u.name?.trim() || u.email || u.id.slice(0, 6)
+}
+
+// Used by control-strip prose ("waiting for X to deal"), so the
+// "(you)" suffix is still useful here for self-referencing copy.
 function seatLabel(seatNum: number): string {
   const u = userBySeat.value[seatNum]
   if (!u) return `seat ${seatNum}`
   const me = user.value?.id === u.id
-  const name = u.name?.trim() || u.email || u.id.slice(0, 6)
-  return `${name}${me ? ' (you)' : ''}`
+  return `${seatName(seatNum)}${me ? ' (you)' : ''}`
 }
 
 // init defaults when table loads
@@ -379,21 +405,38 @@ watch(table, (t) => {
           :class="{
             empty: !seats.some((s) => s.seat_number === i - 1),
             'is-current': isCurrentActor(i - 1),
-            'is-dealer': isDealer(i - 1),
+            'is-me': seatIsMine(i - 1),
           }"
         >
           <template v-if="seats.find((s) => s.seat_number === i - 1)">
-            <div class="name">
+            <div class="head">
+              <UserAvatar :user="userBySeat[i - 1]" :size="28" />
+              <span class="seat-name" :title="seatName(i - 1)">{{ seatName(i - 1) }}</span>
               <span class="seat-num">#{{ i - 1 }}</span>
-              {{ seatLabel(i - 1) }}
-              <span v-if="isDealer(i - 1)" class="badge">D</span>
-              <span v-if="hand && hand.small_blind_seat === i - 1" class="badge">SB</span>
-              <span v-if="hand && hand.big_blind_seat === i - 1" class="badge">BB</span>
+            </div>
+            <div class="badges">
+              <span v-if="isDealer(i - 1)" class="badge dealer" title="dealer">D</span>
+              <span
+                v-else-if="isNextDealer(i - 1)"
+                class="badge dealer next"
+                title="deals the next hand"
+              >D·next</span>
+              <span
+                v-if="hand && hand.small_blind_seat === i - 1"
+                class="badge sb"
+                title="small blind"
+              >SB</span>
+              <span
+                v-if="hand && hand.big_blind_seat === i - 1"
+                class="badge bb"
+                title="big blind"
+              >BB</span>
+              <span v-if="isCurrentActor(i - 1)" class="badge actor" title="to act">▶ acting</span>
               <span
                 v-if="isHandComplete && seats.find((s) => s.seat_number === i - 1)?.ready_for_next"
                 class="badge ready"
                 title="ready for next hand"
-              >✓</span>
+              >✓ ready</span>
             </div>
             <div class="stack">stack {{ seats.find((s) => s.seat_number === i - 1)!.stack }}</div>
             <div class="status" v-if="statusForSeat(i - 1)">{{ statusForSeat(i - 1) }}</div>
@@ -417,7 +460,10 @@ watch(table, (t) => {
             </div>
           </template>
           <template v-else>
-            <div class="empty-label">empty seat {{ i - 1 }}</div>
+            <div class="empty-label">
+              <span class="seat-num">#{{ i - 1 }}</span>
+              empty seat
+            </div>
           </template>
         </li>
       </ol>
@@ -610,22 +656,49 @@ header .phase {
   padding: 0;
   margin: 0 0 1rem 0;
   display: grid;
-  /* auto-fill keeps tiles ~10rem wide on tablets+ but collapses to
+  /* auto-fill keeps tiles ~11rem wide on tablets+ but collapses to
      2 cols on phones and 1 col on tiny screens. */
-  grid-template-columns: repeat(auto-fill, minmax(10rem, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr));
   gap: 0.5rem;
 }
 .seat {
-  border: 1px solid #333;
+  border: 2px solid #333;
   padding: 0.5rem;
-  border-radius: 4px;
+  border-radius: 6px;
   font-size: 0.9rem;
   min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  position: relative;
+  background: #1a1c24;
 }
-.seat .name {
+.seat .head {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  min-width: 0;
+}
+.seat .seat-name {
+  flex: 1 1 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-weight: 600;
+  font-size: 0.95rem;
+}
+.seat-num {
+  opacity: 0.5;
+  font-family: monospace;
+  font-size: 0.75rem;
+  flex-shrink: 0;
+}
+.seat .badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  min-height: 1.1rem;
 }
 
 @media (max-width: 640px) {
@@ -652,35 +725,83 @@ header .phase {
     padding: 0.4rem;
     font-size: 0.85rem;
   }
+  .seat .seat-name {
+    font-size: 0.9rem;
+  }
 }
 .seat.empty {
-  opacity: 0.4;
+  opacity: 0.45;
   font-style: italic;
+  border-style: dashed;
+  background: transparent;
 }
+.seat.empty .empty-label {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+/* Current actor: bright yellow ring on top of whatever the base
+   border is, so it composes with .is-me without colour conflict. */
 .seat.is-current {
-  border-color: #ee9;
-  box-shadow: 0 0 0 2px #ee9 inset;
+  box-shadow: 0 0 0 2px #ee9, 0 0 12px -2px rgba(238, 238, 153, 0.5);
 }
-.seat.is-dealer .badge:first-of-type {
-  background: #466;
+/* "You": persistent blue-tinted border + corner pin so the user can
+   spot themselves at a glance, distinct from the actor highlight. */
+.seat.is-me {
+  border-color: #4af;
+  background: linear-gradient(180deg, rgba(70, 170, 255, 0.07) 0%, #1a1c24 70%);
+}
+.seat.is-me::after {
+  content: 'YOU';
+  position: absolute;
+  top: -0.45rem;
+  right: 0.45rem;
+  background: #4af;
+  color: #0d0e14;
+  padding: 0.05rem 0.35rem;
+  font-size: 0.6rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  border-radius: 2px;
+  pointer-events: none;
 }
 .badge {
-  display: inline-block;
-  padding: 0 0.3rem;
-  margin-left: 0.25rem;
-  background: #333;
-  font-size: 0.7rem;
+  display: inline-flex;
+  align-items: center;
+  padding: 0.05rem 0.4rem;
+  background: #2a2c38;
+  color: #ccc;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
   border-radius: 2px;
+  line-height: 1.4;
+}
+.badge.dealer {
+  background: #2e5d8a;
+  color: #e6f0fa;
+}
+.badge.dealer.next {
+  background: transparent;
+  color: #87b4dc;
+  border: 1px dashed #4d7aa5;
+  padding: 0 0.3rem;
+}
+.badge.sb {
+  background: #8a6f2c;
+  color: #fff5d6;
+}
+.badge.bb {
+  background: #a35420;
+  color: #ffe6d0;
+}
+.badge.actor {
+  background: #ee9;
+  color: #16171d;
 }
 .badge.ready {
   background: #2a5a2a;
   color: #cfc;
-}
-.seat-num {
-  opacity: 0.55;
-  font-family: monospace;
-  font-size: 0.8rem;
-  margin-right: 0.3rem;
 }
 .stack {
   font-family: monospace;

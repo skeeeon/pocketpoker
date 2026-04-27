@@ -6,6 +6,7 @@ export interface UserBrief {
   id: string
   email: string
   name?: string
+  avatar?: string
 }
 
 export interface Seat {
@@ -86,7 +87,7 @@ export function useTable(tableId: Ref<string>) {
       const recs = await pb.collection('users').getFullList({ filter })
       const next: Record<string, UserBrief> = { ...users.value }
       for (const r of recs as unknown as UserBrief[]) {
-        next[r.id] = { id: r.id, email: r.email, name: r.name }
+        next[r.id] = { id: r.id, email: r.email, name: r.name, avatar: r.avatar }
       }
       users.value = next
     } catch {

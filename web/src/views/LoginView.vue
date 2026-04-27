@@ -8,6 +8,7 @@ const router = useRouter()
 
 const email = ref('')
 const password = ref('')
+const name = ref('')
 const mode = ref<'login' | 'register'>('login')
 const error = ref<string | null>(null)
 const busy = ref(false)
@@ -19,7 +20,7 @@ async function submit() {
     if (mode.value === 'login') {
       await login(email.value, password.value)
     } else {
-      await register(email.value, password.value)
+      await register(email.value, password.value, name.value)
     }
     router.push({ name: 'lobby' })
   } catch (e) {
@@ -37,6 +38,10 @@ async function submit() {
       <label>
         Email
         <input v-model="email" type="email" required autocomplete="email" />
+      </label>
+      <label v-if="mode === 'register'">
+        Display name <span class="optional">(optional)</span>
+        <input v-model="name" type="text" maxlength="60" autocomplete="nickname" />
       </label>
       <label>
         Password
@@ -70,6 +75,11 @@ label {
 }
 input {
   padding: 0.4rem 0.6rem;
+}
+.optional {
+  opacity: 0.6;
+  font-weight: normal;
+  font-size: 0.85rem;
 }
 .toggle {
   margin-top: 1rem;
