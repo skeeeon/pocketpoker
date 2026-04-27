@@ -14,6 +14,7 @@ func RegisterRoutes(app core.App) {
 
 		group.POST("/tables/{id}/sit", handleSit)
 		group.POST("/tables/{id}/leave", handleLeave)
+		group.POST("/tables/{id}/ready", handleReady)
 		group.POST("/tables/{id}/start-hand", handleStartHand)
 		group.POST("/hands/{id}/action", handleAction)
 		group.POST("/hands/{id}/fold-player", handleFoldPlayer)

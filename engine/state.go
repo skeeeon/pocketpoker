@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 )
@@ -24,6 +25,38 @@ func (p Phase) String() string {
 		return "unknown"
 	}
 	return phaseStrings[p]
+}
+
+// MarshalJSON serialises Phase as its lowercase label so the wire
+// representation matches the SelectField on hands.phase. Without this,
+// embedded actions[].phase ships as an int and frontend filters that
+// compare against the string label silently never match.
+func (p Phase) MarshalJSON() ([]byte, error) {
+	return json.Marshal(p.String())
+}
+
+// UnmarshalJSON accepts either the string label (preferred) or the
+// legacy integer encoding so older persisted rows still load.
+func (p *Phase) UnmarshalJSON(data []byte) error {
+	var s string
+	if err := json.Unmarshal(data, &s); err == nil {
+		for i, label := range phaseStrings {
+			if label == s {
+				*p = Phase(i)
+				return nil
+			}
+		}
+		return fmt.Errorf("unknown phase %q", s)
+	}
+	var n int
+	if err := json.Unmarshal(data, &n); err != nil {
+		return fmt.Errorf("phase: expected string or int, got %s", string(data))
+	}
+	if n < 0 || n >= len(phaseStrings) {
+		return fmt.Errorf("phase int out of range: %d", n)
+	}
+	*p = Phase(n)
+	return nil
 }
 
 // ActionType is the kind of action a player takes during a hand.

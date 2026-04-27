@@ -15,6 +15,7 @@ export interface Seat {
   seat_number: number
   stack: number
   status: 'active' | 'sitting_out' | 'disconnected'
+  ready_for_next: boolean
 }
 
 export interface HandAction {
@@ -27,7 +28,9 @@ export interface HandAction {
 
 export interface SeatResult {
   seat: number
-  cards: string[]
+  // null when the hand was won uncontested (everyone folded) — the
+  // engine doesn't reveal cards in that case.
+  cards: string[] | null
   rank: number
   class: string
   amount: number

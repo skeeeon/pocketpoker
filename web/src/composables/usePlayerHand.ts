@@ -14,26 +14,44 @@ export interface HandPlayer {
 // usePlayerHand subscribes to the caller's own hand_players row(s) for
 // the given hand. Returns the row (single ref) plus, when the hand is
 // complete and rules permit, the full list of opponents' hand_players.
+//
+// PocketBase realtime delivers events only when a record itself
+// changes — it does NOT push records that *become* visible because of
+// a rule re-evaluation triggered by a parent record change. So when
+// hand.phase flips to "complete", opponents' hand_players rows stay
+// invisible to the subscriber until the next explicit fetch. Callers
+// must invoke `reload()` on that phase transition.
 export function usePlayerHand(handId: Ref<string>) {
   const myHand = ref<HandPlayer | null>(null)
   const allHands = ref<HandPlayer[]>([])
 
   let unsub: (() => void) | null = null
+  let currentId = ''
 
-  async function load(id: string) {
-    cleanup()
-    if (!id || !pb.authStore.isValid) return
+  async function fetchList(id: string) {
+    if (!id || !pb.authStore.isValid) {
+      myHand.value = null
+      allHands.value = []
+      return
+    }
     try {
       const recs = await pb.collection('hand_players').getFullList({
         filter: `hand = "${id}"`,
       })
       allHands.value = recs as unknown as HandPlayer[]
       myHand.value =
-        (allHands.value.find((h) => h.user === pb.authStore.record?.id) ?? null)
+        allHands.value.find((h) => h.user === pb.authStore.record?.id) ?? null
     } catch {
       myHand.value = null
       allHands.value = []
     }
+  }
+
+  async function load(id: string) {
+    cleanup()
+    currentId = id
+    await fetchList(id)
+    if (!id || !pb.authStore.isValid) return
 
     try {
       unsub = await pb.collection('hand_players').subscribe('*', (e) => {
@@ -54,6 +72,14 @@ export function usePlayerHand(handId: Ref<string>) {
     }
   }
 
+  // Re-fetch hand_players for the currently subscribed hand without
+  // tearing down the subscription. Used when `hand.phase` transitions
+  // and previously-hidden opponent rows become readable.
+  async function reload() {
+    if (!currentId) return
+    await fetchList(currentId)
+  }
+
   function cleanup() {
     if (unsub) {
       unsub()
@@ -65,5 +91,5 @@ export function usePlayerHand(handId: Ref<string>) {
   onMounted(() => load(handId.value))
   onUnmounted(cleanup)
 
-  return { myHand, allHands }
+  return { myHand, allHands, reload }
 }

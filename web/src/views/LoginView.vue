@@ -79,4 +79,13 @@ input {
   color: #d33;
   margin-top: 1rem;
 }
+
+@media (max-width: 640px) {
+  .login {
+    margin: 1.5rem auto;
+  }
+  form button {
+    width: 100%;
+  }
+}
 </style>

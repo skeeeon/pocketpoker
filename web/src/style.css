@@ -294,3 +294,37 @@ code {
     border-right-color: var(--border);
   }
 }
+
+/* ----- Poker app baseline (mobile-friendly) ----- */
+*, *::before, *::after { box-sizing: border-box; }
+
+button, input, select, textarea {
+  font: inherit;
+}
+
+/* Inputs at <16px trigger iOS Safari's auto-zoom on focus. */
+input, select, textarea {
+  font-size: 16px;
+}
+
+button {
+  cursor: pointer;
+  border-radius: 4px;
+  border: 1px solid #444;
+  background: #2a2a2a;
+  color: inherit;
+  padding: 0.45rem 0.85rem;
+  /* Removes the 300ms tap delay on iOS without disabling pinch zoom. */
+  touch-action: manipulation;
+}
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+@media (max-width: 640px) {
+  button, input, select {
+    /* Apple's HIG and Material both recommend ~44px touch targets. */
+    min-height: 2.5rem;
+  }
+}

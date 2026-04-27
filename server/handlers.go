@@ -97,10 +97,86 @@ func handleLeave(e *core.RequestEvent) error {
 	}
 	seat := seats[0]
 	stack := seat.GetInt("stack")
-	if err := e.App.Delete(seat); err != nil {
-		return e.InternalServerError("delete seat", err)
+
+	// Refuse to leave during an active hand the caller is in. The dealer
+	// can force-fold them via /fold-player; once the hand completes,
+	// they may leave normally.
+	tableRec, err := e.App.FindRecordById("tables", tableID)
+	if err != nil {
+		return e.InternalServerError("load table", err)
+	}
+	currentHandID := tableRec.GetString("current_hand")
+	if currentHandID != "" {
+		if handRec, err := e.App.FindRecordById("hands", currentHandID); err == nil {
+			if handRec.GetString("phase") != "complete" {
+				inHand, _ := e.App.FindRecordsByFilter("hand_players",
+					"hand = {:h} && user = {:u}", "", 1, 0,
+					dbx.Params{"h": currentHandID, "u": e.Auth.Id})
+				if len(inHand) > 0 {
+					return e.BadRequestError(
+						"cannot leave during an active hand; ask the dealer to fold you out", nil)
+				}
+			}
+		}
+	}
+
+	// hand_players.seat is a Required, non-cascading relation, so PB
+	// refuses to delete the seat while history rows reference it. Wipe
+	// the leaving player's hand_players rows first. hands.actions and
+	// hands.deck_state are preserved on the hand record itself, so
+	// replay still works.
+	err = e.App.RunInTransaction(func(tx core.App) error {
+		hps, err := tx.FindRecordsByFilter("hand_players",
+			"seat = {:s}", "", 0, 0, dbx.Params{"s": seat.Id})
+		if err != nil {
+			return fmt.Errorf("find hand_players: %w", err)
+		}
+		for _, hp := range hps {
+			if err := tx.Delete(hp); err != nil {
+				return fmt.Errorf("delete hand_player: %w", err)
+			}
+		}
+		if err := tx.Delete(seat); err != nil {
+			return fmt.Errorf("delete seat: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return e.InternalServerError(err.Error(), err)
 	}
 	return e.JSON(200, map[string]any{"chips_returned": stack})
+}
+
+// ----- Ready for next hand -----
+
+type readyRequest struct {
+	Ready bool `json:"ready"`
+}
+
+func handleReady(e *core.RequestEvent) error {
+	tableID := e.Request.PathValue("id")
+	var req readyRequest
+	// Treat empty body as { ready: true } — it's the common case.
+	_ = e.BindBody(&req)
+	if e.Request.ContentLength == 0 {
+		req.Ready = true
+	}
+
+	seats, err := e.App.FindRecordsByFilter("seats",
+		"table = {:t} && user = {:u}", "", 1, 0,
+		dbx.Params{"t": tableID, "u": e.Auth.Id})
+	if err != nil {
+		return e.InternalServerError("query seats", err)
+	}
+	if len(seats) == 0 {
+		return e.NotFoundError("you are not seated at this table", nil)
+	}
+	seat := seats[0]
+	seat.Set("ready_for_next", req.Ready)
+	if err := e.App.Save(seat); err != nil {
+		return e.InternalServerError("save ready state", err)
+	}
+	return e.JSON(200, map[string]any{"ready": req.Ready})
 }
 
 // ----- Start hand -----
@@ -140,30 +216,58 @@ func handleStartHand(e *core.RequestEvent) error {
 		return e.BadRequestError(err.Error(), nil)
 	}
 
-	// Determine the dealer seat. For the first hand at a table, the
-	// caller (must be seated) becomes the dealer. For subsequent hands,
-	// rotate from the previous hand's dealer to the next active seat
-	// clockwise; the caller must occupy that seat.
-	priorHands, _ := e.App.FindRecordsByFilter("hands",
-		"table = {:t}", "-created", 1, 0, dbx.Params{"t": tableID})
+	// Determine the dealer seat. We use tables.current_hand (set on
+	// every start-hand, never cleared) as the "is there a hand to
+	// rotate from" signal — same source the frontend uses to compute
+	// who shows the start button. priorHands lookups are fragile
+	// against stale data from older code paths that cleared
+	// current_hand on completion.
+	currentHandID := tableRec.GetString("current_hand")
+	var prevHand *core.Record
+	if currentHandID != "" {
+		prevHand, _ = e.App.FindRecordById("hands", currentHandID)
+	}
 	dealerSeatNum := -1
-	if len(priorHands) == 0 {
+	if prevHand == nil {
+		// Lowest-numbered active seat. seats are already sorted by seat_number.
 		for _, s := range seats {
-			if s.GetString("user") == e.Auth.Id {
+			if s.GetString("status") == "active" {
 				dealerSeatNum = s.GetInt("seat_number")
 				break
 			}
 		}
+		if dealerSeatNum < 0 {
+			return e.InternalServerError("no active seat to deal to", nil)
+		}
 	} else {
-		prevDealer := priorHands[0].GetInt("dealer_seat")
+		// Subsequent hands require ready-up only from seats that were in
+		// the previous hand and are still here. New sit-downs (and seats
+		// whose hand_players were cleaned up via leave) skip the gate —
+		// they have nothing to review.
+		prevHandID := prevHand.Id
+		notReady := []int{}
+		for _, s := range seats {
+			hps, _ := e.App.FindRecordsByFilter("hand_players",
+				"hand = {:h} && seat = {:s}", "", 1, 0,
+				dbx.Params{"h": prevHandID, "s": s.Id})
+			if len(hps) == 0 {
+				continue
+			}
+			if !s.GetBool("ready_for_next") {
+				notReady = append(notReady, s.GetInt("seat_number"))
+			}
+		}
+		if len(notReady) > 0 {
+			return e.BadRequestError(
+				fmt.Sprintf("waiting on seats %v to mark ready", notReady), nil)
+		}
+
+		prevDealer := prevHand.GetInt("dealer_seat")
 		next, ok := nextActiveSeatClockwise(seats, prevDealer)
 		if !ok {
 			return e.InternalServerError("no active seat to deal to", nil)
 		}
 		dealerSeatNum = next
-	}
-	if dealerSeatNum < 0 {
-		return e.ForbiddenError("you must be seated to start a hand", nil)
 	}
 	dealerCheck := false
 	for _, s := range seats {
@@ -173,7 +277,8 @@ func handleStartHand(e *core.RequestEvent) error {
 		}
 	}
 	if !dealerCheck {
-		return e.ForbiddenError("only the dealer may start a hand", nil)
+		return e.ForbiddenError(
+			fmt.Sprintf("only the dealer (seat %d) may start a hand", dealerSeatNum), nil)
 	}
 
 	// Build seated players input for the engine, sorted by seat number.
@@ -253,6 +358,17 @@ func handleStartHand(e *core.RequestEvent) error {
 			rec.Set("status", string(ps.Status))
 			if err := tx.Save(rec); err != nil {
 				return fmt.Errorf("save hand_player: %w", err)
+			}
+		}
+
+		// Reset ready_for_next on every seat — players must opt in to the
+		// next hand after this one finishes.
+		for _, s := range seats {
+			if s.GetBool("ready_for_next") {
+				s.Set("ready_for_next", false)
+				if err := tx.Save(s); err != nil {
+					return fmt.Errorf("reset ready: %w", err)
+				}
 			}
 		}
 
@@ -378,17 +494,9 @@ func handleAction(e *core.RequestEvent) error {
 		return e.InternalServerError("save hand", err)
 	}
 
-	// If the hand reached completion, clear tables.current_hand so the
-	// next start-hand begins fresh.
-	if newState.Phase == engine.PhaseComplete {
-		if hRec, err := e.App.FindRecordById("hands", handID); err == nil {
-			tID := hRec.GetString("table")
-			if tableRec, err := e.App.FindRecordById("tables", tID); err == nil {
-				tableRec.Set("current_hand", "")
-				_ = e.App.Save(tableRec)
-			}
-		}
-	}
+	// Note: tables.current_hand is intentionally NOT cleared on completion.
+	// The completed hand stays referenced so clients can keep showing the
+	// winner banner. The next start-hand call overwrites current_hand.
 
 	return e.JSON(200, map[string]any{
 		"phase":              newState.Phase.String(),

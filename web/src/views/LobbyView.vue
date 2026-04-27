@@ -103,7 +103,11 @@ header {
   display: flex;
   justify-content: space-between;
   align-items: baseline;
+  gap: 0.5rem;
   margin-bottom: 1rem;
+}
+header h2 {
+  margin: 0;
 }
 .create {
   display: flex;
@@ -117,6 +121,15 @@ header {
 .create input {
   padding: 0.3rem 0.5rem;
 }
+.create > input,
+.create label {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.create label input {
+  width: 5rem;
+  margin-left: 0.4rem;
+}
 .list {
   list-style: none;
   padding: 0;
@@ -126,15 +139,19 @@ header {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
   padding: 0.5rem 0.75rem;
   border-bottom: 1px solid #2a2a2a;
 }
 .row .name {
   font-weight: 600;
+  flex: 1 1 auto;
 }
 .row .meta {
   font-size: 0.85rem;
   opacity: 0.75;
+  flex: 1 1 100%;
 }
 .empty {
   opacity: 0.7;
@@ -142,5 +159,31 @@ header {
 }
 .err {
   color: #d33;
+}
+
+@media (max-width: 640px) {
+  .create {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .create > input,
+  .create > label,
+  .create > button {
+    width: 100%;
+  }
+  .create label {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .create label input {
+    width: 8rem;
+  }
+  .row {
+    padding: 0.6rem 0.5rem;
+  }
+  .row > button {
+    width: 100%;
+  }
 }
 </style>
