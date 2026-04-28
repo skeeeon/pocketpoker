@@ -1,9 +1,9 @@
 # pocketpoker
 
-A private friend-group poker app supporting Hold'em, Omaha, and six custom
-variants. The server is a single Go binary that imports PocketBase as a
-library and embeds the built Vue 3 SPA via `go:embed`, so deployment is
-one binary and a `pb_data/` directory.
+A private friend-group poker app supporting Hold'em, Omaha, and eight
+custom variants. The server is a single Go binary that imports PocketBase
+as a library and embeds the built Vue 3 SPA via `go:embed`, so deployment
+is one binary and a `pb_data/` directory.
 
 Built for trust-based play among friends — server is authoritative, no
 real money, no anti-cheat surface beyond standard auth.
@@ -19,12 +19,15 @@ encoded in [engine/variants.go](engine/variants.go).
 | Omaha        | 4          | exactly 2 | exactly 3  | 8         |
 | KCK          | 3          | 0–3       | 2–5        | 8         |
 | Kansas City  | 4          | 0–4       | 1–5        | 8         |
-| Portland     | 5          | 1–4       | 1–4        | 8         |
+| Portland     | 5          | 0–4       | 1–5        | 8         |
 | Miami        | 5          | 0–5       | 0–5        | 8         |
+| Three Fifths | 5          | 0–3       | 2–5        | 8         |
+| St Louis     | 6          | 0–3       | 2–5        | 7         |
 | Dubai        | 7          | 0–5       | 0–5        | 6         |
 | Nova Scotia  | 7          | 0–2       | 3–5        | 6         |
 
-Seat caps for 7-card variants come from `floor((52 − 5) / 7) = 6`.
+Seat caps come from `floor((52 − BoardSize) / HandSize)`: 7 for the
+6-card St Louis variant and 6 for the 7-card variants.
 
 ## Stack
 
@@ -46,18 +49,22 @@ pocketpoker/
 ├── engine/                    # Pure game logic, zero PB dependency
 │   ├── card.go                # Card / Suit / Rank, parsing, JSON
 │   ├── deck.go                # Fisher-Yates shuffle, deal helpers
-│   ├── variants.go            # 8-variant config including max_seats
+│   ├── variants.go            # 10-variant config including max_seats
 │   ├── evaluator.go           # 5-card eval + variant combo enumeration
-│   ├── state.go               # HandState + Phase / Action enums
+│   ├── state.go               # HandState + Phase / Action / Pot enums
 │   ├── betting.go             # ApplyAction, round-completion logic
-│   ├── pot.go                 # Single main pot (side pots TODO)
+│   ├── pot.go                 # Main + side pot construction & payout
+│   ├── bot.go                 # Bot personalities + Decide()
 │   └── *_test.go
 ├── server/
 │   ├── handlers.go            # All custom HTTP handlers
 │   ├── store.go               # PB <-> engine state mapping w/ versioning
+│   ├── bot_loop.go            # Async bot-turn driver (Decide -> ApplyAction)
+│   ├── users_hook.go          # OnRecordCreate hook for users collection
 │   └── routes.go              # Route registration
 ├── pb_migrations/             # Go-based PocketBase migrations
 ├── pb_data/                   # PB data dir (gitignored)
+├── tests/integration.sh       # End-to-end HTTP smoke test
 └── web/                       # Vue 3 SPA
     ├── src/
     │   ├── composables/       # useAuth, useTable, usePlayerHand, useVariants
@@ -131,8 +138,13 @@ design — there is no public signup.
 ## Testing
 
 ```bash
-# Engine unit tests (variant scenarios, betting edges, full-hand sims).
+# Engine unit tests (variant scenarios, betting edges, full-hand sims,
+# side-pot settlement, bot decision legality).
 go test ./engine/...
+
+# End-to-end HTTP integration test. Requires a running server with
+# seeded variants on :8090.
+bash tests/integration.sh
 
 # Frontend type-check + production build.
 cd web && npm run build
@@ -167,6 +179,8 @@ All under `/api/poker/*`, all auth-required.
 | ------ | ------------------------------------- | ------------------------------------ |
 | POST   | `/tables/{id}/sit`                    | Take an empty seat with a buy-in     |
 | POST   | `/tables/{id}/leave`                  | Vacate seat (rejected mid-hand)      |
+| POST   | `/tables/{id}/add-bot`                | Dealer-only; seat a bot with a chosen personality |
+| POST   | `/tables/{id}/remove-bot`             | Dealer-only; unseat a bot between hands |
 | POST   | `/tables/{id}/ready`                  | Mark caller ready for the next hand  |
 | POST   | `/tables/{id}/start-hand`             | Dealer-only; deals a new hand        |
 | POST   | `/hands/{id}/action`                  | Submit fold/check/call/bet/raise/all-in |
@@ -175,22 +189,34 @@ All under `/api/poker/*`, all auth-required.
 
 ## Status
 
-Implementation tracks a phased plan; through Phase 5 the app supports:
+Currently supported:
 
-- All 8 variants with dealer-choice variant picker
+- All 10 variants with dealer-choice variant picker
 - Seat-cap enforcement (engine + UI)
 - Dealer rotation with a deterministic first-hand rule
 - Per-seat ready-up between hands so players can review the winner
 - Showdown UI highlighting each winner's chosen 5 cards (hole + board)
+- **Side pots** — main and side pots are constructed at showdown from
+  the action log; each pot is awarded to the best hand among its
+  eligible (non-folded, sufficiently committed) seats. Uncalled bets
+  return naturally as a single-eligible top layer.
+- **Bots** — dealer can add an AI player to any empty seat with a chosen
+  personality (Tight Tina, Loose Larry, Maniac Mike, Calling Station Carl).
+  Bots use Monte Carlo equity estimation and pot-odds thresholds to pick
+  fold/check/call/bet/raise; sizes are pot-fraction with aggression and
+  equity factors and always cap at the bot's stack.
+- **User profiles** — display names separate from email; emails are
+  visible to other authenticated friends so a host can invite by lookup.
 - Mobile-responsive layout
 
 Known gaps (deferred until a real session demands them):
 
-- Side pots — engine returns a clear error on multi-way unequal-stack
-  all-ins; the failing test is `t.Skip("side pots: TODO")`-marked.
 - Action timer / clock.
 - Hand history / replay viewer (data is captured; no UI yet).
 - Disconnect handling beyond the dealer's manual `fold-player` button.
+- Busted-player handling between hands — `Deal` rejects players whose
+  stack fell below the big blind, but there is no auto-rebuy/auto-leave
+  flow yet.
 
 ## Out of scope
 

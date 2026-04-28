@@ -1,5 +1,36 @@
-# Vue 3 + TypeScript + Vite
+# pocketpoker SPA
 
-This template should help get you started developing with Vue 3 and TypeScript in Vite. The template uses Vue 3 `<script setup>` SFCs, check out the [script setup docs](https://v3.vuejs.org/api/sfc-script-setup.html#sfc-script-setup) to learn more.
+Vue 3 + TypeScript + Vite frontend for [pocketpoker](../README.md). The
+built `dist/` is embedded into the Go binary via `go:embed` (see
+[embed.go](embed.go)) and served at `/` in production. In dev, run Vite
+on its own port and let it talk to the PocketBase backend on `:8090`
+through the official PB JS SDK — there is no proxy or separate API
+client layer.
 
-Learn more about the recommended Project Setup and IDE Support in the [Vue Docs TypeScript Guide](https://vuejs.org/guide/typescript/overview.html#project-setup).
+## Commands
+
+```bash
+npm install        # first-time deps
+npm run dev        # Vite dev server with HMR (typically :5173)
+npm run build      # vue-tsc -b && vite build → dist/
+```
+
+`npm run build` is the only frontend check; there is no test runner.
+The build runs `vue-tsc` first, so type errors fail the build.
+
+## Layout
+
+- `src/composables/` — `useAuth`, `useTable`, `usePlayerHand`, `useVariants`
+- `src/views/` — `LoginView`, `LobbyView`, `TableView`
+- `src/pb.ts` — PocketBase client singleton
+
+## Notes
+
+- `dist/.gitkeep` is committed (mirrored from `public/.gitkeep`, which
+  Vite copies into every build) so `go build` always has something to
+  embed even on a fresh clone before `npm run build`.
+- Realtime: PB SSE subscriptions handle live updates. When `hand.phase`
+  transitions into a reveal state, `usePlayerHand` re-fetches
+  `hand_players` because PB realtime does not push records that *become*
+  visible due to a parent record's API rule re-evaluating — see the
+  comment in [usePlayerHand.ts](src/composables/usePlayerHand.ts).
