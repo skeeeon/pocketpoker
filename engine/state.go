@@ -107,6 +107,15 @@ type SeatResult struct {
 	Amount int      `json:"amount"`
 }
 
+// Pot is a single chip layer at showdown. With unequal all-ins, the
+// total wager splits into a main pot plus one or more side pots; each
+// is contested only by seats whose total commitment reached that layer.
+type Pot struct {
+	Amount   int          `json:"amount"`
+	Eligible []int        `json:"eligible"`
+	Winners  []SeatResult `json:"winners,omitempty"`
+}
+
 // HandState captures everything about an in-progress hand. It is the
 // engine's single source of truth and the wire shape persisted to
 // PocketBase. Pure transition functions accept and return HandState.
@@ -127,6 +136,7 @@ type HandState struct {
 	BigBlind         int           `json:"big_blind"`
 	Actions          []Action      `json:"actions"`
 	Winners          []SeatResult  `json:"winners,omitempty"`
+	Pots             []Pot         `json:"pots,omitempty"`
 }
 
 // SeatedPlayer is the input to Deal: a seat with its starting stack.

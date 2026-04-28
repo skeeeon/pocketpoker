@@ -5,35 +5,29 @@ import (
 	"sort"
 )
 
-// goToShowdown finishes the hand: validates side-pot prerequisites,
-// evaluates each remaining player's best 5-card hand, distributes the
-// pot, and marks the hand complete.
+// goToShowdown finishes the hand: builds the main pot plus any side
+// pots from the action log, evaluates each non-folded player's best
+// 5-card hand, distributes each pot to the best hand among its
+// eligible seats, and marks the hand complete.
 //
-// Side pots are intentionally NOT implemented in v1. If at showdown
-// any two non-folded seats have committed unequal totals across the
-// hand, this function returns an error so the caller can surface a
-// clear "side pots not yet supported" message. This catches multi-way
-// unequal-stack all-ins; common cases (last-player-standing, equal-stack
-// all-ins) settle correctly.
+// Side-pot layering: when seats committed unequal totals (typically
+// because someone went all-in for less than the full bet), the chips
+// split into layers. Each layer is contested only by seats whose
+// total commitment reached that layer; chips from a folded or
+// short-stacked seat below the layer still seed the pot but their
+// owner cannot win it.
 func goToShowdown(s *HandState) error {
 	s.Phase = PhaseShowdown
 	s.CurrentActorSeat = -1
 	s.CurrentBet = 0
-
-	if err := checkNoSidePot(s); err != nil {
-		return err
-	}
 
 	variant, err := VariantByKey(s.VariantKey)
 	if err != nil {
 		return err
 	}
 
-	type contestant struct {
-		seat   int
-		result HandResult
-	}
-	var contestants []contestant
+	// Evaluate each non-folded seat once and reuse across all pots.
+	results := make(map[int]HandResult)
 	for i := range s.Players {
 		p := &s.Players[i]
 		if p.Status == PlayerFolded {
@@ -43,94 +37,154 @@ func goToShowdown(s *HandState) error {
 		if err != nil {
 			return fmt.Errorf("showdown seat %d: %w", p.Seat, err)
 		}
-		contestants = append(contestants, contestant{p.Seat, res})
+		results[p.Seat] = res
 	}
-	if len(contestants) == 0 {
+	if len(results) == 0 {
 		return fmt.Errorf("showdown: no contestants")
 	}
 
-	// Lowest rank wins (1 = royal flush, 7462 = worst high card).
-	minRank := contestants[0].result.Rank
-	for _, c := range contestants {
-		if c.result.Rank < minRank {
-			minRank = c.result.Rank
+	pots := buildPots(s)
+
+	// Per-seat aggregated payout for the legacy Winners field. Keyed
+	// by seat so a winner who collects from multiple pots gets one
+	// row whose Amount is the sum.
+	totalBySeat := map[int]int{}
+
+	for pi := range pots {
+		pot := &pots[pi]
+		// Find best rank among eligible seats. Eligible is constructed
+		// from non-folded seats, so every entry has a HandResult.
+		minRank := HandRank(0)
+		first := true
+		for _, seat := range pot.Eligible {
+			r := results[seat].Rank
+			if first || r < minRank {
+				minRank = r
+				first = false
+			}
 		}
-	}
-	var winners []contestant
-	for _, c := range contestants {
-		if c.result.Rank == minRank {
-			winners = append(winners, c)
+		var winners []int
+		for _, seat := range pot.Eligible {
+			if results[seat].Rank == minRank {
+				winners = append(winners, seat)
+			}
 		}
+		// Stable seat order so split-pot remainder always goes to the
+		// same seat (lowest seat number).
+		sort.Ints(winners)
+
+		share := pot.Amount / len(winners)
+		remainder := pot.Amount - share*len(winners)
+		potResults := make([]SeatResult, len(winners))
+		for i, w := range winners {
+			amount := share
+			if i == 0 {
+				amount += remainder
+			}
+			r := results[w]
+			potResults[i] = SeatResult{
+				Seat:   w,
+				Cards:  r.Cards,
+				Rank:   r.Rank,
+				Class:  r.Class,
+				Amount: amount,
+			}
+			idx, err := s.playerIndex(w)
+			if err != nil {
+				return err
+			}
+			s.Players[idx].Stack += amount
+			totalBySeat[w] += amount
+		}
+		pot.Winners = potResults
 	}
 
-	// Stable seat order so split-pot remainder always goes to the same seat
-	// (lowest seat number).
-	sort.Slice(winners, func(i, j int) bool {
-		return winners[i].seat < winners[j].seat
-	})
-
-	share := s.Pot / len(winners)
-	remainder := s.Pot - share*len(winners)
-
-	results := make([]SeatResult, len(winners))
-	for i, w := range winners {
-		amount := share
-		if i == 0 {
-			amount += remainder
-		}
-		results[i] = SeatResult{
-			Seat:   w.seat,
-			Cards:  w.result.Cards,
-			Rank:   w.result.Rank,
-			Class:  w.result.Class,
-			Amount: amount,
-		}
-		idx, err := s.playerIndex(w.seat)
-		if err != nil {
-			return err
-		}
-		s.Players[idx].Stack += amount
+	// Aggregate per-seat winnings across pots into the legacy Winners
+	// list. Each seat appears at most once; Cards/Rank/Class come from
+	// that seat's evaluated hand.
+	winningSeats := make([]int, 0, len(totalBySeat))
+	for seat := range totalBySeat {
+		winningSeats = append(winningSeats, seat)
 	}
-	s.Winners = results
+	sort.Ints(winningSeats)
+	aggregated := make([]SeatResult, 0, len(winningSeats))
+	for _, seat := range winningSeats {
+		r := results[seat]
+		aggregated = append(aggregated, SeatResult{
+			Seat:   seat,
+			Cards:  r.Cards,
+			Rank:   r.Rank,
+			Class:  r.Class,
+			Amount: totalBySeat[seat],
+		})
+	}
+
+	s.Pots = pots
+	s.Winners = aggregated
 	s.Pot = 0
 	s.Phase = PhaseComplete
 	return nil
 }
 
-// checkNoSidePot returns an error if any two non-folded players have
-// committed different total amounts across the hand. That case requires
-// side-pot accounting which is deferred to v1.1.
-func checkNoSidePot(s *HandState) error {
-	canonical := -1
-	canonicalSeat := -1
+// buildPots constructs the main pot and any side pots from the action
+// log + folded status. It sweeps the distinct total-commitment levels
+// of non-folded seats in ascending order; each level produces one pot
+// whose chips come from min(c_j, level) - min(c_j, prev) summed over
+// every seat (folded contributors included), and whose eligible
+// winners are the non-folded seats with c_j >= level.
+//
+// In the common case of equal commitments this produces a single pot
+// equal to s.Pot. With unequal all-ins it produces the standard
+// main + side layering. Uncalled bets fall out naturally: the top
+// layer has only one eligible seat, who trivially wins it back.
+func buildPots(s *HandState) []Pot {
+	commit := make(map[int]int, len(s.Players))
+	for _, a := range s.Actions {
+		commit[a.Seat] += a.Amount
+	}
+
+	levelSet := map[int]struct{}{}
 	for i := range s.Players {
 		p := &s.Players[i]
 		if p.Status == PlayerFolded {
 			continue
 		}
-		c := totalCommitted(s, p.Seat)
-		if canonical < 0 {
-			canonical = c
-			canonicalSeat = p.Seat
-			continue
-		}
-		if c != canonical {
-			return fmt.Errorf(
-				"side pots not yet supported: seat %d committed %d, seat %d committed %d",
-				canonicalSeat, canonical, p.Seat, c)
+		if c := commit[p.Seat]; c > 0 {
+			levelSet[c] = struct{}{}
 		}
 	}
-	return nil
+	levels := make([]int, 0, len(levelSet))
+	for l := range levelSet {
+		levels = append(levels, l)
+	}
+	sort.Ints(levels)
+
+	var pots []Pot
+	prev := 0
+	for _, level := range levels {
+		amount := 0
+		for _, c := range commit {
+			contribution := min(c, level) - min(c, prev)
+			if contribution > 0 {
+				amount += contribution
+			}
+		}
+		var eligible []int
+		for i := range s.Players {
+			p := &s.Players[i]
+			if p.Status == PlayerFolded {
+				continue
+			}
+			if commit[p.Seat] >= level {
+				eligible = append(eligible, p.Seat)
+			}
+		}
+		sort.Ints(eligible)
+		if amount > 0 && len(eligible) > 0 {
+			pots = append(pots, Pot{Amount: amount, Eligible: eligible})
+		}
+		prev = level
+	}
+	return pots
 }
 
-// totalCommitted returns the total amount `seat` has put into the pot
-// across the entire hand (sum of all action amounts for that seat).
-func totalCommitted(s *HandState, seat int) int {
-	sum := 0
-	for _, a := range s.Actions {
-		if a.Seat == seat {
-			sum += a.Amount
-		}
-	}
-	return sum
-}

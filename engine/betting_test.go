@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"strings"
 	"testing"
 )
 
@@ -376,38 +375,3 @@ func TestEqualStackAllInsRunOutBoardAndSettle(t *testing.T) {
 	}
 }
 
-func TestUnequalStackAllInsTriggerSidePotError(t *testing.T) {
-	// A short-stacked dealer goes all-in for less than the others'
-	// commitment -> side pots required, v1 should error at showdown.
-	holdem, _ := VariantByKey("holdem")
-	deck := DeckFromSnapshot(scriptedDeck(""))
-	state, err := Deal(holdem,
-		[]SeatedPlayer{
-			{Seat: 0, Stack: 50}, // shortest
-			{Seat: 2, Stack: 200},
-			{Seat: 5, Stack: 200},
-		},
-		deck, 10, 20, 0)
-	if err != nil {
-		t.Fatalf("Deal: %v", err)
-	}
-	// Dealer all-in for 50.
-	state, err = ApplyAction(state, 0, ActionAllIn, 0)
-	if err != nil {
-		t.Fatalf("dealer all-in: %v", err)
-	}
-	// SB raises to 100 (calling dealer's 50 plus extra). SB has 200-10=190 left.
-	state, err = ApplyAction(state, 2, ActionRaise, 90) // total 100
-	if err != nil {
-		t.Fatalf("SB raise: %v", err)
-	}
-	// BB calls.
-	state, err = ApplyAction(state, 5, ActionCall, 0)
-	if err == nil && state.Phase == PhaseComplete && state.Winners != nil {
-		t.Fatalf("expected side-pot error at showdown, got clean settlement")
-	}
-	if err != nil && !strings.Contains(err.Error(), "side pot") {
-		// Also acceptable if the error surfaces at showdown.
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
