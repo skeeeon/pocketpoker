@@ -131,9 +131,13 @@ backend-only work.
 ### First-run admin
 
 On a fresh `pb_data/`, the first user to hit the PB admin UI creates
-the superuser account. From there, create accounts for the friend
-group via Collections → users → New record. Onboarding is closed by
-design — there is no public signup.
+the superuser account. Friends self-register from the SPA's login page
+("Create account" tab) — the form posts to PocketBase's REST `users`
+collection. The `users` create hook (`server/users_hook.go`) flips
+`emailVisibility` on by default so a host can find friends by email
+when filling seats. Trust model is the friend group; if you want
+gated onboarding, tighten the `users` collection's create rule in
+the PB admin UI.
 
 ## Testing
 
@@ -220,5 +224,7 @@ Known gaps (deferred until a real session demands them):
 
 ## Out of scope
 
-Real money, regulatory surface, public signup, anti-cheat, mobile
-native apps, push notifications. This is a private friend-group app.
+Real money, regulatory surface, anti-cheat, mobile native apps, push
+notifications. This is a private friend-group app — anyone with the
+URL can register, so deploy it somewhere your friends already have
+the link.
