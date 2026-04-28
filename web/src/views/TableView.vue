@@ -113,11 +113,12 @@ const isDealerMe = computed(() => {
   return mySeat.value.seat_number === nextDealerSeat.value
 })
 
-// Sitting down
-const sitSeatNumber = ref<number>(0)
+// Sitting down. -1 sentinel means "not yet picked"; the watcher below
+// fills it from `nextOpenSeat()` once table+seats are loaded.
+const sitSeatNumber = ref<number>(-1)
 const sitBuyIn = ref<number>(0)
 function nextOpenSeat(): number {
-  if (!table.value) return 0
+  if (!table.value) return -1
   const taken = new Set(seats.value.map((s) => s.seat_number))
   for (let i = 0; i < table.value.max_seats; i++) {
     if (!taken.has(i)) return i
@@ -365,14 +366,30 @@ function seatLabel(seatNum: number): string {
   return `${seatName(seatNum)}${me ? ' (you)' : ''}`
 }
 
-// init defaults when table loads
-watch(table, (t) => {
-  if (t && sitBuyIn.value === 0) sitBuyIn.value = t.buy_in
-  if (sitSeatNumber.value === 0) {
-    const next = nextOpenSeat()
-    if (next >= 0) sitSeatNumber.value = next
-  }
-})
+// Init / auto-correct sit-down defaults whenever table or seats change.
+// Watching both refs (instead of just `table`) ensures the seat picker
+// fills in once seats finish loading — `useTable` fetches table first
+// and seats second, so a single-ref watcher could sample stale seats.
+//
+// The seat is only rewritten when the current value is out of range or
+// already taken, so a deliberate user override is preserved (until
+// someone else snipes it, in which case auto-correct kicks in).
+watch(
+  [table, seats],
+  () => {
+    const t = table.value
+    if (t && sitBuyIn.value === 0) sitBuyIn.value = t.buy_in
+
+    const cur = sitSeatNumber.value
+    const inRange = !!t && cur >= 0 && cur < t.max_seats
+    const taken = seats.value.some((s) => s.seat_number === cur)
+    if (!inRange || taken) {
+      const next = nextOpenSeat()
+      if (next >= 0) sitSeatNumber.value = next
+    }
+  },
+  { immediate: true },
+)
 </script>
 
 <template>
@@ -458,6 +475,7 @@ watch(table, (t) => {
             <div v-if="winnerInfo(i - 1)" class="winner">
               won {{ winnerInfo(i - 1)!.amount }} · {{ winnerInfo(i - 1)!.class }}
             </div>
+            <div v-if="seatIsMine(i - 1)" class="me-stripe">YOU</div>
           </template>
           <template v-else>
             <div class="empty-label">
@@ -751,19 +769,28 @@ header .phase {
   border-color: #4af;
   background: linear-gradient(180deg, rgba(70, 170, 255, 0.07) 0%, #1a1c24 70%);
 }
-.seat.is-me::after {
-  content: 'YOU';
-  position: absolute;
-  top: -0.45rem;
-  right: 0.45rem;
+/* Full-width footer ribbon. Negative side+bottom margins cancel the
+   tile's padding so the stripe sits flush with the inside of the
+   border, with the bottom corners rounded to match. Lives in flow
+   layout (not absolute), so it never overlaps avatar/cards/winner. */
+.me-stripe {
+  margin: 0.25rem -0.5rem -0.5rem -0.5rem;
   background: #4af;
   color: #0d0e14;
-  padding: 0.05rem 0.35rem;
+  text-align: center;
+  padding: 0.15rem 0;
   font-size: 0.6rem;
   font-weight: 800;
-  letter-spacing: 0.08em;
-  border-radius: 2px;
-  pointer-events: none;
+  letter-spacing: 0.2em;
+  border-bottom-left-radius: 4px;
+  border-bottom-right-radius: 4px;
+}
+@media (max-width: 640px) {
+  .me-stripe {
+    /* Tile padding shrinks to 0.4rem on phones; match it so the
+       ribbon still bleeds to the tile edges without leaving gaps. */
+    margin: 0.2rem -0.4rem -0.4rem -0.4rem;
+  }
 }
 .badge {
   display: inline-flex;

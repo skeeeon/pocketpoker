@@ -68,35 +68,55 @@ function joinTable(id: string) {
   <section class="lobby">
     <header>
       <h2>Tables</h2>
-      <button @click="showCreate = !showCreate">
+      <button :class="{ primary: !showCreate }" @click="showCreate = !showCreate">
         {{ showCreate ? 'cancel' : '+ new table' }}
       </button>
     </header>
 
     <form v-if="showCreate" class="create" @submit.prevent="createTable">
-      <input v-model="newName" placeholder="table name" />
-      <label>buy-in <input v-model.number="newBuyIn" type="number" min="20" /></label>
-      <label>SB <input v-model.number="newSb" type="number" min="1" /></label>
-      <label>BB <input v-model.number="newBb" type="number" min="2" /></label>
-      <button :disabled="creating" type="submit">create</button>
+      <label class="full">
+        <span>Name</span>
+        <input v-model="newName" type="text" placeholder="Friday night" />
+      </label>
+      <label>
+        <span>Buy-in</span>
+        <input v-model.number="newBuyIn" type="number" min="20" />
+      </label>
+      <label>
+        <span>SB</span>
+        <input v-model.number="newSb" type="number" min="1" />
+      </label>
+      <label>
+        <span>BB</span>
+        <input v-model.number="newBb" type="number" min="2" />
+      </label>
+      <button :disabled="creating" type="submit" class="primary">
+        {{ creating ? '…' : 'create' }}
+      </button>
     </form>
 
     <p v-if="error" class="err">{{ error }}</p>
 
-    <ul v-if="tables.length" class="list">
-      <li v-for="t in tables" :key="t.id" class="row">
-        <span class="name">{{ t.name }}</span>
-        <span class="meta">SB/BB {{ t.small_blind }}/{{ t.big_blind }} · buy-in {{ t.buy_in }} · {{ t.status }}</span>
-        <button @click="joinTable(t.id)">open</button>
+    <ul v-if="tables.length" class="grid">
+      <li v-for="t in tables" :key="t.id" class="card" @click="joinTable(t.id)">
+        <div class="card-head">
+          <span class="name">{{ t.name }}</span>
+          <span class="status" :class="t.status">{{ t.status }}</span>
+        </div>
+        <div class="meta">
+          <span class="pill mono">{{ t.small_blind }}/{{ t.big_blind }}</span>
+          <span class="muted">buy-in {{ t.buy_in }}</span>
+        </div>
+        <span class="open">open →</span>
       </li>
     </ul>
-    <p v-else class="empty">no tables yet — create one to start</p>
+    <p v-else class="empty muted">No tables yet — create one to start.</p>
   </section>
 </template>
 
 <style scoped>
 .lobby {
-  max-width: 40rem;
+  max-width: 42rem;
   margin: 0 auto;
 }
 header {
@@ -106,84 +126,133 @@ header {
   gap: 0.5rem;
   margin-bottom: 1rem;
 }
-header h2 {
-  margin: 0;
-}
+
 .create {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.5rem;
-  align-items: center;
-  padding: 0.75rem;
-  border: 1px dashed #444;
+  display: grid;
+  grid-template-columns: 2fr 1fr 1fr 1fr auto;
+  gap: 0.6rem;
+  align-items: end;
+  padding: 0.85rem;
+  border: 1px solid var(--border);
+  background: var(--bg-elev);
+  border-radius: var(--radius);
   margin-bottom: 1rem;
 }
-.create input {
-  padding: 0.3rem 0.5rem;
-}
-.create > input,
 .create label {
-  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
   min-width: 0;
 }
-.create label input {
-  width: 5rem;
-  margin-left: 0.4rem;
+.create label.full { grid-column: 1 / -1; }
+.create label > span {
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
 }
-.list {
+.create input { width: 100%; }
+.create > button { white-space: nowrap; }
+
+.grid {
   list-style: none;
   padding: 0;
   margin: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr));
+  gap: 0.75rem;
 }
-.row {
+.card {
+  position: relative;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.75rem 0.9rem;
+  cursor: pointer;
   display: flex;
-  justify-content: space-between;
+  flex-direction: column;
+  gap: 0.4rem;
+  transition: border-color 120ms ease, transform 120ms ease, background 120ms ease;
+}
+.card:hover {
+  border-color: var(--border-focus);
+  background: var(--bg-elev-2);
+  transform: translateY(-1px);
+}
+.card-head {
+  display: flex;
   align-items: center;
-  flex-wrap: wrap;
+  justify-content: space-between;
   gap: 0.5rem;
-  padding: 0.5rem 0.75rem;
-  border-bottom: 1px solid #2a2a2a;
 }
-.row .name {
+.card .name {
   font-weight: 600;
+  font-size: 1rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   flex: 1 1 auto;
+  min-width: 0;
 }
-.row .meta {
+.status {
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 0.1rem 0.4rem;
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--text-muted);
+}
+.status.active {
+  background: rgba(102, 204, 102, 0.15);
+  color: var(--good);
+}
+.status.waiting {
+  background: rgba(238, 238, 153, 0.12);
+  color: var(--warn);
+}
+.meta {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
   font-size: 0.85rem;
-  opacity: 0.75;
-  flex: 1 1 100%;
 }
+.pill {
+  display: inline-block;
+  padding: 0.1rem 0.45rem;
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-radius: var(--radius-sm);
+  font-weight: 600;
+  font-size: 0.85rem;
+}
+.open {
+  align-self: flex-end;
+  font-size: 0.8rem;
+  color: var(--accent);
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+.card:hover .open { opacity: 1; }
+
 .empty {
-  opacity: 0.7;
+  text-align: center;
+  padding: 2rem 1rem;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
   font-style: italic;
-}
-.err {
-  color: #d33;
 }
 
 @media (max-width: 640px) {
   .create {
-    flex-direction: column;
-    align-items: stretch;
+    grid-template-columns: repeat(3, 1fr);
   }
-  .create > input,
-  .create > label,
-  .create > button {
-    width: 100%;
-  }
-  .create label {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-  }
-  .create label input {
-    width: 8rem;
-  }
-  .row {
-    padding: 0.6rem 0.5rem;
-  }
-  .row > button {
-    width: 100%;
-  }
+  .create label.full { grid-column: 1 / -1; }
+  .create > button { grid-column: 1 / -1; width: 100%; }
+  .grid { grid-template-columns: 1fr; }
+  /* On phones the open hint doesn't trigger via :hover; show it. */
+  .open { opacity: 0.8; }
 }
 </style>
