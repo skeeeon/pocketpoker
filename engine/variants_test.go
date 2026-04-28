@@ -77,10 +77,15 @@ func TestValidCombosByVariant(t *testing.T) {
 		{"kck", [][2]int{{0, 5}, {1, 4}, {2, 3}, {3, 2}}},
 		// Kansas City: 0-4 from hand, 1-5 from board. (0,5)-(4,1).
 		{"kansas_city", [][2]int{{0, 5}, {1, 4}, {2, 3}, {3, 2}, {4, 1}}},
-		// Portland: 1-4 from hand, 1-4 from board. (1,4), (2,3), (3,2), (4,1).
-		{"portland", [][2]int{{1, 4}, {2, 3}, {3, 2}, {4, 1}}},
+		// Portland: 0-4 from hand, 1-5 from board. Like Miami but caps
+		// hand usage at 4 (cannot play all 5 hole cards).
+		{"portland", [][2]int{{0, 5}, {1, 4}, {2, 3}, {3, 2}, {4, 1}}},
 		// Miami: 0-5 from hand, 0-5 from board. All sums-to-5 pairs.
 		{"miami", [][2]int{{0, 5}, {1, 4}, {2, 3}, {3, 2}, {4, 1}, {5, 0}}},
+		// Three Fifths: 5-card hand, 0-3 from hand.
+		{"three_fifths", [][2]int{{0, 5}, {1, 4}, {2, 3}, {3, 2}}},
+		// St Louis: 6-card hand, 0-3 from hand.
+		{"st_louis", [][2]int{{0, 5}, {1, 4}, {2, 3}, {3, 2}}},
 		// Dubai: hand size 7 but at most 5 used; same as Miami in (h,b) space.
 		{"dubai", [][2]int{{0, 5}, {1, 4}, {2, 3}, {3, 2}, {4, 1}, {5, 0}}},
 		// Nova Scotia: 0-2 from hand, 3-5 from board. Same shape as Hold'em.

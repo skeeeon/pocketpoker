@@ -33,8 +33,10 @@ var Variants = []Variant{
 	{"omaha", "Omaha", 4, 2, 2, 3, 3, 8},
 	{"kck", "KCK", 3, 0, 3, 2, 5, 8},
 	{"kansas_city", "Kansas City", 4, 0, 4, 1, 5, 8},
-	{"portland", "Portland", 5, 1, 4, 1, 4, 8},
+	{"portland", "Portland", 5, 0, 4, 1, 5, 8},
 	{"miami", "Miami", 5, 0, 5, 0, 5, 8},
+	{"three_fifths", "Three Fifths", 5, 0, 3, 2, 5, 8},
+	{"st_louis", "St Louis", 6, 0, 3, 2, 5, 7},
 	{"dubai", "Dubai", 7, 0, 5, 0, 5, 6},
 	{"nova_scotia", "Nova Scotia", 7, 0, 2, 3, 5, 6},
 }

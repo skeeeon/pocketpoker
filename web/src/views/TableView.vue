@@ -242,38 +242,58 @@ async function leaveTable() {
   }
 }
 
-// Variant picker
-const pickerOpen = ref(false)
-const pickedVariantKey = ref<string>('holdem')
-
-function openPicker() {
-  // Default to a variant that fits the current seat count when possible.
-  const fits = variants.value.find((v) => seats.value.length <= v.max_seats)
-  pickedVariantKey.value = fits?.key ?? variants.value[0]?.key ?? 'holdem'
-  pickerOpen.value = true
-}
+// Variant picker. Inline dropdown + Deal button — no modal. The last
+// chosen variant persists across reloads in localStorage so most starts
+// are a single click. Rule summaries live as `title` tooltips on each
+// option, and a one-line summary of the current pick sits below the
+// dropdown so the info isn't fully hidden behind hover.
+const VARIANT_STORAGE_KEY = 'pocketpoker:last_variant'
+const pickedVariantKey = ref<string>(
+  (typeof localStorage !== 'undefined' && localStorage.getItem(VARIANT_STORAGE_KEY)) ||
+    'holdem',
+)
+watch(pickedVariantKey, (key) => {
+  try {
+    localStorage.setItem(VARIANT_STORAGE_KEY, key)
+  } catch {
+    /* private mode / quota — silent */
+  }
+})
 
 function variantFits(v: Variant): boolean {
   return seats.value.length <= v.max_seats
 }
 
-function variantTooltip(v: Variant): string {
-  const summary = variantRuleSummary(v)
-  if (!variantFits(v)) {
-    return `${summary}\n\nDisabled: ${seats.value.length} seated > ${v.max_seats} max.`
-  }
-  return summary
-}
+const pickedVariant = computed<Variant | null>(
+  () => variants.value.find((v) => v.key === pickedVariantKey.value) ?? null,
+)
+const pickedVariantSummary = computed(() =>
+  pickedVariant.value ? variantRuleSummary(pickedVariant.value) : '',
+)
+const pickedVariantFits = computed(() =>
+  pickedVariant.value ? variantFits(pickedVariant.value) : false,
+)
+
+// If the persisted choice no longer fits the current seat count (e.g.,
+// you picked Dubai (max 6) earlier, then sat 7 humans), nudge the
+// selection to the first variant that fits. Re-runs whenever variants
+// load or seat count changes.
+watch(
+  [variants, seats],
+  () => {
+    if (!variants.value.length) return
+    const cur = variants.value.find((v) => v.key === pickedVariantKey.value)
+    if (cur && variantFits(cur)) return
+    const fallback = variants.value.find((v) => variantFits(v))
+    if (fallback) pickedVariantKey.value = fallback.key
+  },
+  { immediate: true },
+)
 
 async function startHand() {
-  if (!table.value) return
-  const v = variants.value.find((x) => x.key === pickedVariantKey.value)
-  if (!v) {
-    error.value = `unknown variant ${pickedVariantKey.value}`
-    return
-  }
-  if (!variantFits(v)) {
-    error.value = `${v.name} supports at most ${v.max_seats} seats; ${seats.value.length} are seated.`
+  if (!table.value || !pickedVariant.value) return
+  if (!variantFits(pickedVariant.value)) {
+    error.value = `${pickedVariant.value.name} supports at most ${pickedVariant.value.max_seats} seats; ${seats.value.length} are seated.`
     return
   }
   busy.value = true
@@ -283,7 +303,6 @@ async function startHand() {
       method: 'POST',
       body: { variant_key: pickedVariantKey.value },
     })
-    pickerOpen.value = false
   } catch (e) {
     error.value = (e as Error).message
   } finally {
@@ -676,14 +695,38 @@ watch(
             + add bot
           </button>
           <template v-if="!hand || isHandComplete">
-            <button
-              v-if="isDealerMe"
-              :disabled="busy || seats.length < 3 || (isHandComplete && !everyoneReady)"
-              :title="isHandComplete && !everyoneReady ? `waiting on seats ${notReadySeats.join(', ')} to ready` : ''"
-              @click="openPicker"
-            >
-              start hand…
-            </button>
+            <template v-if="isDealerMe">
+              <label class="variant-picker">
+                <span class="variant-picker-label">variant</span>
+                <select
+                  v-model="pickedVariantKey"
+                  :disabled="busy"
+                  class="variant-select"
+                  :title="pickedVariantSummary"
+                >
+                  <option
+                    v-for="v in variants"
+                    :key="v.id"
+                    :value="v.key"
+                    :disabled="!variantFits(v)"
+                    :title="variantRuleSummary(v)"
+                  >
+                    {{ v.name }}{{ !variantFits(v) ? ` (max ${v.max_seats})` : '' }}
+                  </option>
+                </select>
+              </label>
+              <button
+                :disabled="busy || seats.length < 3 || !pickedVariantFits || (isHandComplete && !everyoneReady)"
+                :title="
+                  isHandComplete && !everyoneReady
+                    ? `waiting on seats ${notReadySeats.join(', ')} to ready`
+                    : pickedVariant ? variantRuleSummary(pickedVariant) : ''
+                "
+                @click="startHand"
+              >
+                deal
+              </button>
+            </template>
             <span v-else-if="nextDealerSeat !== null" class="muted dealer-wait">
               waiting for {{ seatLabel(nextDealerSeat) }} to deal
             </span>
@@ -731,45 +774,6 @@ watch(
             <button :disabled="busy" @click="botPickerOpen = false">cancel</button>
             <button :disabled="busy || botSeatNumber < 0" @click="addBot">
               add
-            </button>
-          </div>
-        </div>
-      </div>
-
-      <!-- Variant picker modal -->
-      <div v-if="pickerOpen" class="modal-backdrop" @click.self="pickerOpen = false">
-        <div class="modal" role="dialog" aria-label="Choose variant">
-          <h3>Choose variant</h3>
-          <p class="muted">{{ seats.length }} seated</p>
-          <ol class="variant-list">
-            <li
-              v-for="v in variants"
-              :key="v.id"
-              :class="{ disabled: !variantFits(v), picked: pickedVariantKey === v.key }"
-            >
-              <label :title="variantTooltip(v)">
-                <input
-                  type="radio"
-                  name="variant"
-                  :value="v.key"
-                  :disabled="!variantFits(v)"
-                  v-model="pickedVariantKey"
-                />
-                <span class="vname">{{ v.name }}</span>
-                <span class="vrule">{{ variantRuleSummary(v) }}</span>
-                <span v-if="!variantFits(v)" class="vwarn">
-                  needs ≤ {{ v.max_seats }} seats
-                </span>
-              </label>
-            </li>
-          </ol>
-          <div class="modal-actions">
-            <button :disabled="busy" @click="pickerOpen = false">cancel</button>
-            <button
-              :disabled="busy || !variants.find((v) => v.key === pickedVariantKey && variantFits(v))"
-              @click="startHand"
-            >
-              deal
             </button>
           </div>
         </div>
@@ -1190,6 +1194,34 @@ fieldset input { width: 5rem; }
   background: #2a3d5a;
   color: #cfe;
   border-color: #4a6c95;
+}
+/* Inline variant picker. Replaces the prior full-screen variant modal:
+   single dropdown + Deal button. Hover the dropdown (or any option) for
+   the rule summary; the current pick persists in localStorage. */
+.variant-picker {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+.variant-picker-label {
+  font-size: 0.7rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  opacity: 0.7;
+}
+.variant-select {
+  font: inherit;
+  padding: 0.25rem 0.4rem;
+  border: 1px solid #444;
+  border-radius: 4px;
+  background: #181a22;
+  color: inherit;
+  cursor: pointer;
+  min-width: 9rem;
+}
+.variant-select:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 .hint {
   font-size: 0.85rem;

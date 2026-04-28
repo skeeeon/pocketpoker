@@ -177,10 +177,26 @@ func TestKCKThreeFromHandStraight(t *testing.T) {
 	}
 }
 
-func TestPortlandRequiresAtLeastOneFromHand(t *testing.T) {
-	// Portland forces at least 1 from hand. A board-only royal flush
-	// is therefore unreachable; check that the result is weaker than
-	// rank 1 even with a royal flush on the board.
+func TestPortlandCapsHandUsageAtFour(t *testing.T) {
+	// Portland is Miami minus the 5-from-hand option: at most 4 hole
+	// cards may play, so a 5-card royal flush in hand can never go
+	// straight to rank 1 — at least 1 board card must contribute.
+	portland, _ := VariantByKey("portland")
+	hole := MustParseCards("As Ks Qs Js Ts") // royal in hand
+	board := MustParseCards("2c 3d 4h 5s 7h") // garbage board
+
+	res, err := BestHand(hole, board, portland)
+	if err != nil {
+		t.Fatalf("BestHand: %v", err)
+	}
+	if res.Rank == 1 {
+		t.Errorf("Portland reached rank 1 despite max-4-from-hand cap")
+	}
+}
+
+func TestPortlandAllowsBoardOnly(t *testing.T) {
+	// Portland now allows 0 from hand. With the board itself a royal,
+	// the player should be able to reach rank 1 with a useless hole.
 	portland, _ := VariantByKey("portland")
 	hole := MustParseCards("2c 3d 4h 5s 7h") // garbage
 	board := MustParseCards("As Ks Qs Js Ts")
@@ -189,8 +205,8 @@ func TestPortlandRequiresAtLeastOneFromHand(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BestHand: %v", err)
 	}
-	if res.Rank == 1 {
-		t.Errorf("Portland reached rank 1 despite forced 1-from-hand")
+	if res.Rank != 1 {
+		t.Errorf("Portland board-only royal: rank=%d want 1", res.Rank)
 	}
 }
 
