@@ -17,6 +17,16 @@ export interface Seat {
   stack: number
   status: 'active' | 'sitting_out' | 'disconnected'
   ready_for_next: boolean
+  bot_personality?: string
+}
+
+// Personality display names. Mirrored from engine/bot.go Personalities;
+// the wire value is the lowercase key, the UI shows the friendly name.
+export const BOT_PERSONALITIES: Record<string, string> = {
+  tight: 'Tight Tina',
+  loose: 'Loose Larry',
+  maniac: 'Maniac Mike',
+  station: 'Calling Station Carl',
 }
 
 export interface HandAction {
@@ -79,7 +89,11 @@ export function useTable(tableId: Ref<string>) {
   const unsubFns: Array<() => void> = []
 
   async function loadUsersForSeats(seatRecs: Seat[]) {
-    const ids = Array.from(new Set(seatRecs.map((s) => s.user)))
+    // Bot seats carry user="" and have no users record to fetch — skip
+    // them or PB will 404 the OR filter.
+    const ids = Array.from(
+      new Set(seatRecs.map((s) => s.user).filter((id) => id !== '')),
+    )
     const missing = ids.filter((id) => !users.value[id])
     if (!missing.length) return
     try {
@@ -95,9 +109,23 @@ export function useTable(tableId: Ref<string>) {
     }
   }
 
+  // Build the seat → display profile map. Humans pull from the users
+  // cache; bots are synthesized from their personality so the existing
+  // avatar/name rendering doesn't need bot-specific branches.
   const userBySeat = computed<Record<number, UserBrief | null>>(() => {
     const out: Record<number, UserBrief | null> = {}
-    for (const s of seats.value) out[s.seat_number] = users.value[s.user] ?? null
+    for (const s of seats.value) {
+      if (s.bot_personality) {
+        const display = BOT_PERSONALITIES[s.bot_personality] ?? s.bot_personality
+        out[s.seat_number] = {
+          id: `bot:${s.id}`,
+          email: '',
+          name: display,
+        }
+        continue
+      }
+      out[s.seat_number] = users.value[s.user] ?? null
+    }
     return out
   })
 

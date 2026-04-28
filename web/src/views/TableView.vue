@@ -3,7 +3,7 @@ import { computed, ref, toRef, watch, watchEffect } from 'vue'
 import { useRouter } from 'vue-router'
 import { pb } from '../pb'
 import { useAuth } from '../composables/useAuth'
-import { useTable } from '../composables/useTable'
+import { useTable, BOT_PERSONALITIES } from '../composables/useTable'
 import { usePlayerHand } from '../composables/usePlayerHand'
 import { useVariants, variantRuleSummary, type Variant } from '../composables/useVariants'
 import UserAvatar from '../components/UserAvatar.vue'
@@ -94,19 +94,24 @@ const notReadySeats = computed(() =>
 )
 const myReady = computed(() => mySeat.value?.ready_for_next ?? false)
 
-// Compute the seat that will deal the NEXT hand, mirroring server logic.
-// First hand at the table (no `hand` record ever loaded): lowest active
-// seat. Otherwise: next active clockwise from the previous dealer.
+// Compute the seat that will deal the NEXT hand, mirroring server logic
+// in handlers.go (nextActiveSeatClockwise + the first-hand branch).
+// Bots are excluded from dealer rotation — they can't drive start-hand,
+// so the button always lands on a human. First hand: lowest active
+// human seat. Otherwise: next eligible clockwise from the previous
+// dealer.
 const nextDealerSeat = computed<number | null>(() => {
-  const active = seats.value.filter((s) => s.status === 'active').sort((a, b) => a.seat_number - b.seat_number)
-  if (active.length === 0) return null
+  const eligible = seats.value
+    .filter((s) => s.status === 'active' && !s.bot_personality)
+    .sort((a, b) => a.seat_number - b.seat_number)
+  if (eligible.length === 0) return null
   if (!hand.value) {
-    return active[0].seat_number
+    return eligible[0].seat_number
   }
   const prev = table.value?.current_dealer_seat ?? -1
-  const idx = active.findIndex((s) => s.seat_number === prev)
-  if (idx < 0) return active[0].seat_number
-  return active[(idx + 1) % active.length].seat_number
+  const idx = eligible.findIndex((s) => s.seat_number === prev)
+  if (idx < 0) return eligible[0].seat_number
+  return eligible[(idx + 1) % eligible.length].seat_number
 })
 const isDealerMe = computed(() => {
   if (!mySeat.value || nextDealerSeat.value === null) return false
@@ -142,6 +147,86 @@ async function sitDown() {
     busy.value = false
   }
 }
+
+// Bot picker state. Opened by the "Add Bot" button when a human at the
+// table wants to populate an empty seat. Personality keys mirror the
+// engine's Personalities map.
+const botPickerOpen = ref(false)
+const botPersonalityKey = ref<string>('tight')
+const botSeatNumber = ref<number>(-1)
+const personalityOptions = Object.entries(BOT_PERSONALITIES) as [string, string][]
+
+function openBotPicker() {
+  botSeatNumber.value = nextOpenSeat()
+  botPickerOpen.value = true
+}
+
+async function addBot() {
+  if (!table.value) return
+  if (botSeatNumber.value < 0) {
+    error.value = 'no open seats'
+    return
+  }
+  if (!BOT_PERSONALITIES[botPersonalityKey.value]) {
+    error.value = `unknown personality ${botPersonalityKey.value}`
+    return
+  }
+  busy.value = true
+  error.value = null
+  try {
+    await pb.send(`/api/poker/tables/${table.value.id}/add-bot`, {
+      method: 'POST',
+      body: {
+        seat_number: botSeatNumber.value,
+        buy_in_amount: table.value.buy_in,
+        personality: botPersonalityKey.value,
+      },
+    })
+    botPickerOpen.value = false
+  } catch (e) {
+    error.value = (e as Error).message
+  } finally {
+    busy.value = false
+  }
+}
+
+async function removeBot(seatNumber: number) {
+  if (!table.value) return
+  busy.value = true
+  error.value = null
+  try {
+    await pb.send(`/api/poker/tables/${table.value.id}/remove-bot`, {
+      method: 'POST',
+      body: { seat_number: seatNumber },
+    })
+  } catch (e) {
+    error.value = (e as Error).message
+  } finally {
+    busy.value = false
+  }
+}
+
+function isBotSeat(seatNum: number): boolean {
+  const s = seats.value.find((x) => x.seat_number === seatNum)
+  return !!s?.bot_personality
+}
+
+// Add Bot is offered to any seated human while there's an open seat
+// and no live hand running. The server enforces these too — this is
+// just UI gating.
+const canAddBot = computed(() => {
+  if (!isSeated.value || !table.value) return false
+  if (seats.value.length >= table.value.max_seats) return false
+  if (hand.value && !isHandComplete.value) return false
+  return true
+})
+
+// Surface the engine.MinPlayers=3 rule as a friendly nudge when the
+// table is short. Only show to seated humans (otherwise they'd see it
+// before sitting down, which is confusing).
+const needsMorePlayers = computed(
+  () => isSeated.value && seats.value.length < 3,
+)
 
 async function leaveTable() {
   if (!table.value) return
@@ -288,6 +373,22 @@ function findHoleCardsForSeat(seatNum: number): string[] {
   return hp?.hole_cards ?? []
 }
 
+// Mid-hand stack display. seats.stack is intentionally only written at
+// hand start and hand completion (see CLAUDE.md), so during a live hand
+// it shows the start-of-hand value. Derive the running stack the same
+// way LoadHand does server-side: subtract this seat's total commits in
+// the active hand. When no hand is live or the hand is complete, the
+// seat record already holds the canonical value.
+function runningStack(seatNum: number): number {
+  const s = seats.value.find((x) => x.seat_number === seatNum)
+  if (!s) return 0
+  if (!hand.value || hand.value.phase === 'complete') return s.stack
+  const committed = (hand.value.actions ?? [])
+    .filter((a) => a.seat === seatNum)
+    .reduce((sum, a) => sum + a.amount, 0)
+  return s.stack - committed
+}
+
 function statusForSeat(seatNum: number): string {
   const seatRec = seats.value.find((s) => s.seat_number === seatNum)
   if (!seatRec) return ''
@@ -366,6 +467,17 @@ function seatLabel(seatNum: number): string {
   return `${seatName(seatNum)}${me ? ' (you)' : ''}`
 }
 
+// Seat numbers rendered in the opponents ribbon. When seated, we
+// exclude our own seat — the me-dock takes over its display. When not
+// seated (spectator), every seat renders here so the full table is
+// visible without a me-dock.
+const opponentSeatNumbers = computed<number[]>(() => {
+  if (!table.value) return []
+  const all = Array.from({ length: table.value.max_seats }, (_, i) => i)
+  if (!isSeated.value) return all
+  return all.filter((n) => !seatIsMine(n))
+})
+
 // Init / auto-correct sit-down defaults whenever table or seats change.
 // Watching both refs (instead of just `table`) ensures the seat picker
 // fills in once seats finish loading — `useTable` fetches table first
@@ -413,80 +525,78 @@ watch(
         <span v-if="hand" class="phase">{{ hand.phase }}</span>
       </header>
 
-      <!-- Seats grid -->
-      <ol class="seats">
+      <!-- Opponents grid: wrapping uniform-width tiles. Each tile is the
+           same column width (no per-tile shrink/grow), names truncate
+           with ellipsis, and the remove-bot button takes inline space
+           instead of overlaying the avatar. -->
+      <ol class="opponents">
         <li
-          v-for="i in table.max_seats"
-          :key="i"
-          class="seat"
+          v-for="n in opponentSeatNumbers"
+          :key="n"
+          class="opponent"
           :class="{
-            empty: !seats.some((s) => s.seat_number === i - 1),
-            'is-current': isCurrentActor(i - 1),
-            'is-me': seatIsMine(i - 1),
+            empty: !seats.some((s) => s.seat_number === n),
+            'is-current': isCurrentActor(n),
+            folded: statusForSeat(n) === 'folded',
           }"
         >
-          <template v-if="seats.find((s) => s.seat_number === i - 1)">
-            <div class="head">
-              <UserAvatar :user="userBySeat[i - 1]" :size="28" />
-              <span class="seat-name" :title="seatName(i - 1)">{{ seatName(i - 1) }}</span>
-              <span class="seat-num">#{{ i - 1 }}</span>
+          <template v-if="seats.find((s) => s.seat_number === n)">
+            <div class="opp-head">
+              <UserAvatar :user="userBySeat[n]" :size="22" />
+              <span class="opp-name" :title="seatName(n)">{{ seatName(n) }}</span>
+              <button
+                v-if="isBotSeat(n) && isSeated && (!hand || isHandComplete)"
+                class="remove-bot-btn"
+                :disabled="busy"
+                :title="`remove ${seatName(n)}`"
+                @click="removeBot(n)"
+              >×</button>
             </div>
-            <div class="badges">
-              <span v-if="isDealer(i - 1)" class="badge dealer" title="dealer">D</span>
-              <span
-                v-else-if="isNextDealer(i - 1)"
-                class="badge dealer next"
-                title="deals the next hand"
-              >D·next</span>
-              <span
-                v-if="hand && hand.small_blind_seat === i - 1"
-                class="badge sb"
-                title="small blind"
-              >SB</span>
-              <span
-                v-if="hand && hand.big_blind_seat === i - 1"
-                class="badge bb"
-                title="big blind"
-              >BB</span>
-              <span v-if="isCurrentActor(i - 1)" class="badge actor" title="to act">▶ acting</span>
-              <span
-                v-if="isHandComplete && seats.find((s) => s.seat_number === i - 1)?.ready_for_next"
-                class="badge ready"
-                title="ready for next hand"
-              >✓ ready</span>
-            </div>
-            <div class="stack">stack {{ seats.find((s) => s.seat_number === i - 1)!.stack }}</div>
-            <div class="status" v-if="statusForSeat(i - 1)">{{ statusForSeat(i - 1) }}</div>
-            <div class="cards" v-if="hand">
-              <template v-if="findHoleCardsForSeat(i - 1).length">
+            <div class="opp-meta">
+              <span class="opp-stack" :title="`stack ${runningStack(n)}`">{{ runningStack(n) }}</span>
+              <span class="opp-badges">
+                <span v-if="isDealer(n)" class="badge dealer" title="dealer">D</span>
+                <span v-else-if="isNextDealer(n)" class="badge dealer next" title="deals next">D</span>
+                <span v-if="hand && hand.small_blind_seat === n" class="badge sb" title="small blind">SB</span>
+                <span v-if="hand && hand.big_blind_seat === n" class="badge bb" title="big blind">BB</span>
+                <span v-if="isCurrentActor(n)" class="badge actor" title="to act">▶</span>
                 <span
-                  v-for="c in findHoleCardsForSeat(i - 1)"
-                  :key="c"
-                  class="card"
-                  :class="[suitClass(c), { chosen: isCardChosenForSeat(i - 1, c) }]"
-                >
-                  {{ formatCard(c) }}
-                </span>
-              </template>
-              <template v-else-if="seats.find((s) => s.seat_number === i - 1)">
-                <span class="card hidden" v-for="n in holeCardCount" :key="n">??</span>
-              </template>
+                  v-if="isHandComplete && seats.find((s) => s.seat_number === n)?.ready_for_next"
+                  class="badge ready"
+                  title="ready"
+                >✓</span>
+              </span>
             </div>
-            <div v-if="winnerInfo(i - 1)" class="winner">
-              won {{ winnerInfo(i - 1)!.amount }} · {{ winnerInfo(i - 1)!.class }}
+            <!-- Hole cards only when actually revealed (showdown/complete).
+                 Face-down "?? ??" fillers add no information mid-hand and
+                 just bloat the tile, so we omit them. -->
+            <div class="opp-cards" v-if="findHoleCardsForSeat(n).length">
+              <span
+                v-for="c in findHoleCardsForSeat(n)"
+                :key="c"
+                class="card mini"
+                :class="[suitClass(c), { chosen: isCardChosenForSeat(n, c) }]"
+              >
+                {{ formatCard(c) }}
+              </span>
             </div>
-            <div v-if="seatIsMine(i - 1)" class="me-stripe">YOU</div>
+            <div v-if="statusForSeat(n) === 'folded'" class="opp-tag">folded</div>
+            <div v-if="winnerInfo(n)" class="opp-winner" :title="winnerInfo(n)!.class">
+              +{{ winnerInfo(n)!.amount }}
+            </div>
           </template>
           <template v-else>
             <div class="empty-label">
-              <span class="seat-num">#{{ i - 1 }}</span>
-              empty seat
+              <span class="seat-num">#{{ n }}</span>
+              <span class="muted">empty</span>
             </div>
           </template>
         </li>
       </ol>
 
-      <!-- Community cards + pot -->
+      <!-- Board centerpiece. Flex-grows to fill remaining vertical space
+           between the opponents ribbon and the me-dock so the cards stay
+           the visual focal point. -->
       <div class="board">
         <div class="board-cards">
           <span v-if="!hand?.community_cards?.length" class="muted">— no board yet —</span>
@@ -502,6 +612,49 @@ watch(
         <div v-if="hand" class="pot-display">pot <strong>{{ hand.pot }}</strong></div>
       </div>
 
+      <!-- Me-dock: the user's own seat, larger and persistent above the
+           action panel so hole cards + stack are always visible. Only
+           rendered when the user is seated. -->
+      <div
+        v-if="mySeat"
+        class="me-dock"
+        :class="{ 'is-current': isMyTurn, folded: statusForSeat(mySeat.seat_number) === 'folded' }"
+      >
+        <div class="dock-head">
+          <UserAvatar :user="userBySeat[mySeat.seat_number]" :size="34" />
+          <div class="dock-id">
+            <span class="dock-name">{{ seatName(mySeat.seat_number) }}</span>
+            <span class="seat-num">#{{ mySeat.seat_number }} · you</span>
+          </div>
+          <div class="dock-badges">
+            <span v-if="isDealer(mySeat.seat_number)" class="badge dealer" title="dealer">D</span>
+            <span v-else-if="isNextDealer(mySeat.seat_number)" class="badge dealer next" title="deals next">D</span>
+            <span v-if="hand && hand.small_blind_seat === mySeat.seat_number" class="badge sb" title="small blind">SB</span>
+            <span v-if="hand && hand.big_blind_seat === mySeat.seat_number" class="badge bb" title="big blind">BB</span>
+            <span v-if="isCurrentActor(mySeat.seat_number)" class="badge actor" title="to act">▶ acting</span>
+          </div>
+          <div class="dock-stack">stack <strong>{{ runningStack(mySeat.seat_number) }}</strong></div>
+        </div>
+        <div class="dock-cards" v-if="hand">
+          <template v-if="findHoleCardsForSeat(mySeat.seat_number).length">
+            <span
+              v-for="c in findHoleCardsForSeat(mySeat.seat_number)"
+              :key="c"
+              class="card big"
+              :class="[suitClass(c), { chosen: isCardChosenForSeat(mySeat.seat_number, c) }]"
+            >
+              {{ formatCard(c) }}
+            </span>
+          </template>
+          <template v-else>
+            <span class="card big hidden" v-for="m in holeCardCount" :key="m">??</span>
+          </template>
+        </div>
+        <div v-if="winnerInfo(mySeat.seat_number)" class="dock-winner">
+          won {{ winnerInfo(mySeat.seat_number)!.amount }} · {{ winnerInfo(mySeat.seat_number)!.class }}
+        </div>
+      </div>
+
       <!-- Sit / Leave / Start hand controls -->
       <div class="controls">
         <template v-if="!isSeated">
@@ -514,6 +667,14 @@ watch(
         </template>
         <template v-else>
           <button :disabled="busy" @click="leaveTable">leave table</button>
+          <button
+            v-if="canAddBot"
+            :disabled="busy"
+            class="add-bot-btn"
+            @click="openBotPicker"
+          >
+            + add bot
+          </button>
           <template v-if="!hand || isHandComplete">
             <button
               v-if="isDealerMe"
@@ -527,7 +688,52 @@ watch(
               waiting for {{ seatLabel(nextDealerSeat) }} to deal
             </span>
           </template>
+          <span v-if="needsMorePlayers" class="hint">
+            Need 3+ players to deal — add a bot?
+          </span>
         </template>
+      </div>
+
+      <!-- Bot picker modal -->
+      <div v-if="botPickerOpen" class="modal-backdrop" @click.self="botPickerOpen = false">
+        <div class="modal" role="dialog" aria-label="Add bot">
+          <h3>Add a bot</h3>
+          <p class="muted">Each archetype plays a noticeably different style.</p>
+          <fieldset class="bot-seat-pick">
+            <label>
+              seat
+              <input
+                v-model.number="botSeatNumber"
+                type="number"
+                min="0"
+                :max="table.max_seats - 1"
+              />
+            </label>
+          </fieldset>
+          <ol class="variant-list">
+            <li
+              v-for="[key, name] in personalityOptions"
+              :key="key"
+              :class="{ picked: botPersonalityKey === key }"
+            >
+              <label>
+                <input
+                  type="radio"
+                  name="bot-personality"
+                  :value="key"
+                  v-model="botPersonalityKey"
+                />
+                <span class="vname">{{ name }}</span>
+              </label>
+            </li>
+          </ol>
+          <div class="modal-actions">
+            <button :disabled="busy" @click="botPickerOpen = false">cancel</button>
+            <button :disabled="busy || botSeatNumber < 0" @click="addBot">
+              add
+            </button>
+          </div>
+        </div>
       </div>
 
       <!-- Variant picker modal -->
@@ -645,16 +851,27 @@ watch(
 </template>
 
 <style scoped>
+/* Full-viewport column layout. The page is split into compact header /
+   opponents ribbon / flex-grow board / persistent me-dock / controls /
+   action panel, so the three things you need every second of play
+   (your hole cards, the board, the action buttons) stay on screen
+   without scrolling. The .board flex:1 absorbs slack space, keeping
+   the cards big and centered regardless of seat count. */
 .table-view {
   max-width: 50rem;
   margin: 0 auto;
+  padding: 0.5rem;
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
 }
 header {
   display: flex;
   align-items: baseline;
   flex-wrap: wrap;
-  gap: 0.5rem 1rem;
-  margin-bottom: 0.75rem;
+  gap: 0.4rem 0.8rem;
+  flex-shrink: 0;
 }
 header h2 {
   margin: 0;
@@ -663,187 +880,131 @@ header h2 {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-size: 1.15rem;
+}
+header .meta {
+  font-size: 0.8rem;
+  opacity: 0.75;
 }
 header .phase {
   margin-left: auto;
   font-family: monospace;
   opacity: 0.85;
+  font-size: 0.85rem;
 }
-.seats {
+
+/* Opponents grid: wrapping, uniform-width tiles. auto-fit + minmax
+   gives us as many columns as fit (6+ on a wide desktop, 2-3 on
+   mobile) with all tiles the SAME width regardless of name length —
+   long names truncate via ellipsis on .opp-name. No horizontal scroll. */
+.opponents {
   list-style: none;
   padding: 0;
-  margin: 0 0 1rem 0;
+  margin: 0;
   display: grid;
-  /* auto-fill keeps tiles ~11rem wide on tablets+ but collapses to
-     2 cols on phones and 1 col on tiny screens. */
-  grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr));
-  gap: 0.5rem;
+  grid-template-columns: repeat(auto-fit, minmax(8.5rem, 1fr));
+  gap: 0.4rem;
+  flex-shrink: 0;
 }
-.seat {
-  border: 2px solid #333;
-  padding: 0.5rem;
-  border-radius: 6px;
-  font-size: 0.9rem;
-  min-width: 0;
+.opponent {
+  border: 1.5px solid #333;
+  background: #1a1c24;
+  border-radius: 5px;
+  padding: 0.35rem 0.45rem;
   display: flex;
   flex-direction: column;
-  gap: 0.3rem;
-  position: relative;
-  background: #1a1c24;
+  gap: 0.2rem;
+  font-size: 0.78rem;
+  min-width: 0; /* required for ellipsis on .opp-name to actually clamp */
 }
-.seat .head {
-  display: flex;
+.opponent.empty {
+  border-style: dashed;
+  background: transparent;
+  opacity: 0.55;
+  font-style: italic;
   align-items: center;
-  gap: 0.45rem;
+  justify-content: center;
+  min-height: 3.4rem;
+}
+.opponent.empty .empty-label {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.1rem;
+}
+.opponent.is-current {
+  border-color: #ee9;
+  box-shadow: 0 0 0 2px #ee9, 0 0 8px -2px rgba(238, 238, 153, 0.45);
+}
+.opponent.folded {
+  opacity: 0.5;
+}
+.opp-head {
+  display: flex;
+  gap: 0.35rem;
+  align-items: center;
   min-width: 0;
 }
-.seat .seat-name {
+.opp-name {
   flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   font-weight: 600;
-  font-size: 0.95rem;
+  font-size: 0.8rem;
+}
+/* Inline remove button. flex: 0 0 auto reserves its own space, so the
+   name truncates around it instead of getting overlapped. */
+.opponent .remove-bot-btn {
+  flex: 0 0 auto;
+  padding: 0 0.35rem;
+  font-size: 0.9rem;
+  line-height: 1;
+  border-radius: 3px;
+}
+.opp-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.opp-stack {
+  font-family: monospace;
+  font-size: 0.85rem;
+  color: #cc6;
+  flex-shrink: 0;
+}
+.opp-badges {
+  display: flex;
+  gap: 0.15rem;
+  flex-wrap: wrap;
+}
+.opp-cards {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.15rem;
+  min-width: 0;
+}
+.opp-tag {
+  font-size: 0.7rem;
+  font-style: italic;
+  opacity: 0.7;
+}
+.opp-winner {
+  color: #4d4;
+  font-weight: 600;
+  font-size: 0.78rem;
 }
 .seat-num {
   opacity: 0.5;
   font-family: monospace;
-  font-size: 0.75rem;
-  flex-shrink: 0;
-}
-.seat .badges {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.25rem;
-  min-height: 1.1rem;
+  font-size: 0.7rem;
 }
 
-@media (max-width: 640px) {
-  header {
-    margin-bottom: 0.5rem;
-  }
-  header h2 {
-    font-size: 1.1rem;
-  }
-  header .meta {
-    font-size: 0.8rem;
-    opacity: 0.75;
-    width: 100%;
-    order: 3;
-  }
-  header .phase {
-    font-size: 0.85rem;
-  }
-  .seats {
-    grid-template-columns: repeat(2, 1fr);
-    gap: 0.4rem;
-  }
-  .seat {
-    padding: 0.4rem;
-    font-size: 0.85rem;
-  }
-  .seat .seat-name {
-    font-size: 0.9rem;
-  }
-}
-.seat.empty {
-  opacity: 0.45;
-  font-style: italic;
-  border-style: dashed;
-  background: transparent;
-}
-.seat.empty .empty-label {
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
-}
-/* Current actor: bright yellow ring on top of whatever the base
-   border is, so it composes with .is-me without colour conflict. */
-.seat.is-current {
-  box-shadow: 0 0 0 2px #ee9, 0 0 12px -2px rgba(238, 238, 153, 0.5);
-}
-/* "You": persistent blue-tinted border + corner pin so the user can
-   spot themselves at a glance, distinct from the actor highlight. */
-.seat.is-me {
-  border-color: #4af;
-  background: linear-gradient(180deg, rgba(70, 170, 255, 0.07) 0%, #1a1c24 70%);
-}
-/* Full-width footer ribbon. Negative side+bottom margins cancel the
-   tile's padding so the stripe sits flush with the inside of the
-   border, with the bottom corners rounded to match. Lives in flow
-   layout (not absolute), so it never overlaps avatar/cards/winner. */
-.me-stripe {
-  margin: 0.25rem -0.5rem -0.5rem -0.5rem;
-  background: #4af;
-  color: #0d0e14;
-  text-align: center;
-  padding: 0.15rem 0;
-  font-size: 0.6rem;
-  font-weight: 800;
-  letter-spacing: 0.2em;
-  border-bottom-left-radius: 4px;
-  border-bottom-right-radius: 4px;
-}
-@media (max-width: 640px) {
-  .me-stripe {
-    /* Tile padding shrinks to 0.4rem on phones; match it so the
-       ribbon still bleeds to the tile edges without leaving gaps. */
-    margin: 0.2rem -0.4rem -0.4rem -0.4rem;
-  }
-}
-.badge {
-  display: inline-flex;
-  align-items: center;
-  padding: 0.05rem 0.4rem;
-  background: #2a2c38;
-  color: #ccc;
-  font-size: 0.68rem;
-  font-weight: 700;
-  letter-spacing: 0.05em;
-  border-radius: 2px;
-  line-height: 1.4;
-}
-.badge.dealer {
-  background: #2e5d8a;
-  color: #e6f0fa;
-}
-.badge.dealer.next {
-  background: transparent;
-  color: #87b4dc;
-  border: 1px dashed #4d7aa5;
-  padding: 0 0.3rem;
-}
-.badge.sb {
-  background: #8a6f2c;
-  color: #fff5d6;
-}
-.badge.bb {
-  background: #a35420;
-  color: #ffe6d0;
-}
-.badge.actor {
-  background: #ee9;
-  color: #16171d;
-}
-.badge.ready {
-  background: #2a5a2a;
-  color: #cfc;
-}
-.stack {
-  font-family: monospace;
-}
-.status {
-  font-size: 0.75rem;
-  font-style: italic;
-  opacity: 0.8;
-}
-.cards {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.25rem;
-  margin-top: 0.25rem;
-}
+/* Cards. Three sizes share base styles: mini (opponent), default
+   (legacy), big (board + me-dock hole cards). */
 .card {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   padding: 0.15rem 0.4rem;
@@ -853,17 +1014,18 @@ header .phase {
   color: #111;
   letter-spacing: 0.02em;
 }
-.card.red {
-  color: #c33;
-}
-.card.black {
-  color: #111;
-}
+.card.red { color: #c33; }
+.card.black { color: #111; }
 .card.hidden {
   background: #2a3a2a;
   color: #888;
   border-color: #3a4a3a;
   opacity: 0.85;
+}
+.card.mini {
+  font-size: 0.7rem;
+  padding: 0.05rem 0.25rem;
+  letter-spacing: 0;
 }
 .card.big {
   font-size: 1.4rem;
@@ -875,21 +1037,19 @@ header .phase {
   border-color: #4c4;
   box-shadow: 0 0 0 2px #4c4;
 }
-.winner {
-  color: #4d4;
-  font-weight: 600;
-  margin-top: 0.25rem;
-}
+
+/* Board: visual centerpiece. flex:1 absorbs leftover vertical space. */
 .board {
+  flex: 1 1 auto;
   display: flex;
   flex-direction: column;
   gap: 0.5rem;
   align-items: center;
+  justify-content: center;
   padding: 1rem;
   border: 1px solid #2a4a2a;
   border-radius: 8px;
-  min-height: 2.5rem;
-  margin-bottom: 0.75rem;
+  min-height: 5rem;
   background: linear-gradient(180deg, #14241a 0%, #0e1a13 100%);
 }
 .board-cards {
@@ -899,17 +1059,6 @@ header .phase {
   gap: 0.5rem;
   align-items: center;
   min-height: 2.4rem;
-}
-
-@media (max-width: 640px) {
-  .board {
-    padding: 0.75rem;
-  }
-  .card.big {
-    font-size: 1.15rem;
-    padding: 0.25rem 0.45rem;
-    min-width: 1.4rem;
-  }
 }
 .pot-display {
   font-size: 0.9rem;
@@ -923,15 +1072,104 @@ header .phase {
   color: #ee9;
   margin-left: 0.25rem;
 }
-.muted {
-  opacity: 0.5;
+
+/* Me-dock: large persistent tile right above the action panel. */
+.me-dock {
+  border: 2px solid #4af;
+  border-radius: 8px;
+  padding: 0.5rem 0.75rem;
+  background: linear-gradient(180deg, rgba(70, 170, 255, 0.10) 0%, #1a1c24 70%);
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  flex-shrink: 0;
 }
+.me-dock.is-current {
+  box-shadow: 0 0 0 2px #ee9, 0 0 12px -2px rgba(238, 238, 153, 0.5);
+}
+.me-dock.folded {
+  opacity: 0.6;
+}
+.dock-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+.dock-id {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.dock-name {
+  font-weight: 700;
+  font-size: 0.95rem;
+}
+.dock-badges {
+  display: flex;
+  gap: 0.25rem;
+  flex-wrap: wrap;
+}
+.dock-stack {
+  margin-left: auto;
+  font-size: 0.8rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  opacity: 0.85;
+}
+.dock-stack strong {
+  font-size: 1.05rem;
+  font-family: monospace;
+  color: #ee9;
+  margin-left: 0.25rem;
+}
+.dock-cards {
+  display: flex;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+.dock-winner {
+  color: #4d4;
+  font-weight: 600;
+  text-align: center;
+  font-size: 0.9rem;
+}
+
+/* Badges (shared between opponents and me-dock). */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.05rem 0.35rem;
+  background: #2a2c38;
+  color: #ccc;
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  border-radius: 2px;
+  line-height: 1.4;
+}
+.badge.dealer { background: #2e5d8a; color: #e6f0fa; }
+.badge.dealer.next {
+  background: transparent;
+  color: #87b4dc;
+  border: 1px dashed #4d7aa5;
+  padding: 0 0.25rem;
+}
+.badge.sb { background: #8a6f2c; color: #fff5d6; }
+.badge.bb { background: #a35420; color: #ffe6d0; }
+.badge.actor { background: #ee9; color: #16171d; }
+.badge.ready { background: #2a5a2a; color: #cfc; }
+
+.muted { opacity: 0.5; }
+
+/* Controls. Sit/Leave/Add bot/Start hand. */
 .controls {
   display: flex;
   gap: 0.5rem;
   align-items: center;
   flex-wrap: wrap;
-  margin-bottom: 0.75rem;
+  flex-shrink: 0;
 }
 fieldset {
   display: flex;
@@ -943,40 +1181,41 @@ fieldset {
   margin: 0;
   min-width: 0;
 }
-fieldset input {
-  width: 5rem;
+fieldset input { width: 5rem; }
+.dealer-wait {
+  font-style: italic;
+  font-size: 0.9rem;
+}
+.add-bot-btn {
+  background: #2a3d5a;
+  color: #cfe;
+  border-color: #4a6c95;
+}
+.hint {
+  font-size: 0.85rem;
+  color: #cb8;
+  font-style: italic;
+}
+.remove-bot-btn {
+  background: transparent;
+  color: #d99;
+  border: 1px dashed #644;
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 0.7rem;
+  padding: 0.1rem 0.5rem;
+}
+.remove-bot-btn:hover:not(:disabled) {
+  background: #2a1818;
+  color: #fbb;
+}
+.bot-seat-pick {
+  margin: 0.5rem 0;
+  border: 1px solid #333;
+  padding: 0.4rem 0.6rem;
 }
 
-@media (max-width: 640px) {
-  .controls {
-    gap: 0.4rem;
-  }
-  fieldset {
-    width: 100%;
-    flex-direction: column;
-    align-items: stretch;
-  }
-  fieldset label {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 0.5rem;
-  }
-  fieldset input {
-    width: 8rem;
-  }
-  fieldset button {
-    width: 100%;
-  }
-  .controls > button {
-    flex: 1 1 auto;
-    min-width: 8rem;
-  }
-  .dealer-wait {
-    flex-basis: 100%;
-    text-align: center;
-  }
-}
+/* Action panel. Sits in normal flow at the bottom of the column. */
 .actions {
   display: flex;
   gap: 0.5rem;
@@ -987,10 +1226,9 @@ fieldset input {
   border-radius: 6px;
   background: #1a1a0c;
   box-shadow: 0 0 0 2px rgba(238, 238, 153, 0.15);
+  flex-shrink: 0;
 }
-.actions input {
-  width: 6rem;
-}
+.actions input { width: 6rem; }
 .your-turn {
   font-size: 0.75rem;
   letter-spacing: 0.08em;
@@ -1000,82 +1238,46 @@ fieldset input {
   padding-right: 0.25rem;
 }
 
-@media (max-width: 640px) {
-  .actions {
-    /* Single grid that wraps cleanly: 2 buttons per row, input+button
-       pair gets a full row by itself for thumb-size tap targets. */
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 0.4rem;
-    padding: 0.5rem;
-    /* Stay above the action bar even when scrolling the seat list. */
-    position: sticky;
-    bottom: 0.5rem;
-  }
-  .actions .your-turn {
-    grid-column: 1 / -1;
-    text-align: center;
-    padding: 0;
-  }
-  .actions button {
-    width: 100%;
-  }
-  .actions input {
-    grid-column: 1 / -1;
-    width: 100%;
-  }
-  /* The bet/raise button right after the input gets the full row too. */
-  .actions input + button {
-    grid-column: 1 / -1;
-  }
-}
-.dealer-wait {
-  font-style: italic;
-  font-size: 0.9rem;
-}
+/* Hand-complete banner, error, log */
 .complete-banner {
-  margin-top: 0.75rem;
-  padding: 0.75rem 1rem;
+  padding: 0.6rem 0.85rem;
   border: 1px solid #4d4;
   border-radius: 6px;
   background: #0f1f0f;
+  flex-shrink: 0;
 }
 .complete-banner h3 {
-  margin: 0 0 0.5rem;
+  margin: 0 0 0.4rem;
   color: #cfc;
+  font-size: 1rem;
 }
 .winners {
   list-style: none;
   padding: 0;
-  margin: 0 0 0.5rem;
+  margin: 0 0 0.4rem;
   display: grid;
-  gap: 0.25rem;
+  gap: 0.2rem;
+  font-size: 0.9rem;
 }
-.winners strong {
-  color: #cfc;
-}
+.winners strong { color: #cfc; }
 .ready-controls {
   display: flex;
   gap: 0.5rem;
-  margin-top: 0.5rem;
+  margin-top: 0.4rem;
 }
 .ready-controls .primary {
   background: #2a5a2a;
   color: #efe;
   border-color: #4c4;
 }
-.err {
-  color: #d44;
-}
+.err { color: #d44; }
 .log {
-  margin-top: 1rem;
   font-size: 0.8rem;
   font-family: monospace;
+  flex-shrink: 0;
 }
-.log ol {
-  margin: 0.25rem 0 0 1rem;
-  padding: 0;
-}
+.log ol { margin: 0.25rem 0 0 1rem; padding: 0; }
+
 .variant-tag {
   font-size: 0.85rem;
   padding: 0.15rem 0.5rem;
@@ -1096,6 +1298,8 @@ fieldset input {
   font-size: 0.7rem;
   opacity: 0.8;
 }
+
+/* Modals (unchanged from prior layout). */
 .modal-backdrop {
   position: fixed;
   inset: 0;
@@ -1116,40 +1320,7 @@ fieldset input {
   max-height: 90vh;
   overflow-y: auto;
 }
-
-@media (max-width: 640px) {
-  .modal-backdrop {
-    /* Bottom-sheet style: easier thumb reach. */
-    align-items: flex-end;
-    padding: 0;
-  }
-  .modal {
-    width: 100%;
-    min-width: 0;
-    max-width: none;
-    max-height: 92vh;
-    border-radius: 12px 12px 0 0;
-    padding: 0.85rem 0.85rem max(0.85rem, env(safe-area-inset-bottom));
-  }
-  .variant-list label {
-    /* Stack on phones so rule summary doesn't crowd the variant name. */
-    grid-template-columns: auto 1fr;
-    gap: 0.4rem 0.6rem;
-    padding: 0.55rem 0.6rem;
-  }
-  .vrule {
-    grid-column: 1 / -1;
-    padding-left: 1.6rem;
-  }
-  .vwarn {
-    grid-column: 1 / -1;
-    padding-left: 1.6rem;
-    white-space: normal;
-  }
-}
-.modal h3 {
-  margin: 0 0 0.25rem;
-}
+.modal h3 { margin: 0 0 0.25rem; }
 .variant-list {
   list-style: none;
   padding: 0;
@@ -1161,12 +1332,8 @@ fieldset input {
   border: 1px solid #333;
   border-radius: 4px;
 }
-.variant-list li.disabled {
-  opacity: 0.45;
-}
-.variant-list li.picked {
-  border-color: #ee9;
-}
+.variant-list li.disabled { opacity: 0.45; }
+.variant-list li.picked { border-color: #ee9; }
 .variant-list label {
   display: grid;
   grid-template-columns: auto 1fr auto;
@@ -1175,12 +1342,8 @@ fieldset input {
   padding: 0.4rem 0.6rem;
   cursor: pointer;
 }
-.variant-list li.disabled label {
-  cursor: not-allowed;
-}
-.vname {
-  font-weight: 600;
-}
+.variant-list li.disabled label { cursor: not-allowed; }
+.vname { font-weight: 600; }
 .vrule {
   font-size: 0.75rem;
   opacity: 0.75;
@@ -1195,5 +1358,125 @@ fieldset input {
   display: flex;
   gap: 0.5rem;
   justify-content: flex-end;
+}
+
+/* Mobile tweaks. The whole layout is already viewport-driven — these
+   just shrink padding and font sizes so opponent tiles fit at least
+   3-up before scrolling kicks in, and the action panel stays
+   thumb-friendly. No more sticky positioning needed: the column flex
+   plus min-height: 100dvh already pin actions to the bottom. */
+@media (max-width: 640px) {
+  .table-view {
+    padding: 0.4rem;
+    gap: 0.4rem;
+  }
+  header h2 { font-size: 1rem; }
+  header .meta {
+    width: 100%;
+    order: 3;
+    font-size: 0.75rem;
+  }
+  header .phase { font-size: 0.8rem; }
+
+  .opponents {
+    /* Slightly smaller minimum on mobile so a 5-handed table fits two
+       cleanly per row at ~360px viewport. */
+    grid-template-columns: repeat(auto-fit, minmax(7rem, 1fr));
+    gap: 0.35rem;
+  }
+  .opponent {
+    padding: 0.25rem 0.35rem;
+    font-size: 0.72rem;
+  }
+  .opp-name { font-size: 0.75rem; }
+  .opp-stack { font-size: 0.78rem; }
+
+  .board {
+    padding: 0.6rem;
+    min-height: 4rem;
+  }
+  .card.big {
+    font-size: 1.15rem;
+    padding: 0.25rem 0.45rem;
+    min-width: 1.4rem;
+  }
+
+  .me-dock {
+    padding: 0.4rem 0.5rem;
+    gap: 0.3rem;
+  }
+  .dock-name { font-size: 0.9rem; }
+  .dock-stack { font-size: 0.75rem; }
+  .dock-stack strong { font-size: 0.95rem; }
+
+  .controls { gap: 0.4rem; }
+  fieldset {
+    width: 100%;
+    flex-direction: column;
+    align-items: stretch;
+  }
+  fieldset label {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+  }
+  fieldset input { width: 8rem; }
+  fieldset button { width: 100%; }
+  .controls > button {
+    flex: 1 1 auto;
+    min-width: 8rem;
+  }
+  .dealer-wait {
+    flex-basis: 100%;
+    text-align: center;
+  }
+
+  .actions {
+    /* 2-up grid for thumb-size buttons. The input+button pair gets a
+       full row by itself. */
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.4rem;
+    padding: 0.5rem;
+  }
+  .actions .your-turn {
+    grid-column: 1 / -1;
+    text-align: center;
+    padding: 0;
+  }
+  .actions button { width: 100%; }
+  .actions input {
+    grid-column: 1 / -1;
+    width: 100%;
+  }
+  .actions input + button { grid-column: 1 / -1; }
+
+  .modal-backdrop {
+    align-items: flex-end;
+    padding: 0;
+  }
+  .modal {
+    width: 100%;
+    min-width: 0;
+    max-width: none;
+    max-height: 92vh;
+    border-radius: 12px 12px 0 0;
+    padding: 0.85rem 0.85rem max(0.85rem, env(safe-area-inset-bottom));
+  }
+  .variant-list label {
+    grid-template-columns: auto 1fr;
+    gap: 0.4rem 0.6rem;
+    padding: 0.55rem 0.6rem;
+  }
+  .vrule {
+    grid-column: 1 / -1;
+    padding-left: 1.6rem;
+  }
+  .vwarn {
+    grid-column: 1 / -1;
+    padding-left: 1.6rem;
+    white-space: normal;
+  }
 }
 </style>
