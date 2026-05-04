@@ -87,6 +87,35 @@ export function useTable(tableId: Ref<string>) {
   const error = ref<string | null>(null)
 
   const unsubFns: Array<() => void> = []
+  let resyncTimer: ReturnType<typeof setInterval> | null = null
+  let visibilityHandler: (() => void) | null = null
+
+  // Belt-and-suspenders against missed PB realtime events (e.g. SSE
+  // reconnect after a network blip drops events that fired during the
+  // gap). We re-fetch seats + current hand on a slow interval and when
+  // the tab regains visibility. Cheap query, so polling is fine.
+  async function resync(id: string) {
+    if (!id) return
+    try {
+      const seatRecs = await pb.collection('seats').getFullList({
+        filter: `table = "${id}"`,
+        sort: 'seat_number',
+      })
+      seats.value = seatRecs as unknown as Seat[]
+      await loadUsersForSeats(seats.value)
+    } catch {
+      /* transient — next tick will retry */
+    }
+    if (table.value?.current_hand) {
+      try {
+        hand.value = (await pb.collection('hands').getOne(
+          table.value.current_hand,
+        )) as unknown as Hand
+      } catch {
+        /* hand may have cleared between calls; ignore */
+      }
+    }
+  }
 
   async function loadUsersForSeats(seatRecs: Seat[]) {
     // Bot seats carry user="" and have no users record to fetch — skip
@@ -203,6 +232,12 @@ export function useTable(tableId: Ref<string>) {
         else if (table.value?.current_hand === rec.id) hand.value = rec
       }),
     )
+
+    resyncTimer = setInterval(() => resync(id), 15000)
+    visibilityHandler = () => {
+      if (document.visibilityState === 'visible') resync(id)
+    }
+    document.addEventListener('visibilitychange', visibilityHandler)
   }
 
   function cleanup() {
@@ -213,6 +248,14 @@ export function useTable(tableId: Ref<string>) {
         /* noop */
       }
     })
+    if (resyncTimer) {
+      clearInterval(resyncTimer)
+      resyncTimer = null
+    }
+    if (visibilityHandler) {
+      document.removeEventListener('visibilitychange', visibilityHandler)
+      visibilityHandler = null
+    }
   }
 
   watch(tableId, (id) => loadAndSubscribe(id), { immediate: false })
