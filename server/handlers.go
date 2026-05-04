@@ -723,6 +723,69 @@ func handleFoldPlayer(e *core.RequestEvent) error {
 	return e.JSON(200, map[string]any{"phase": newState.Phase.String()})
 }
 
+// ----- Delete table -----
+
+// handleDeleteTable removes a table and all its dependent records.
+// Only the table's creator may delete. PB's cascade chains
+// (table → seats and table → hands → hand_players) race against the
+// non-cascading hand_players.seat FK, so we wipe the graph in
+// dependency order inside a single transaction instead of relying on
+// PB's automatic cascade.
+func handleDeleteTable(e *core.RequestEvent) error {
+	tableID := e.Request.PathValue("id")
+
+	tableRec, err := e.App.FindRecordById("tables", tableID)
+	if err != nil {
+		return e.NotFoundError("table not found", nil)
+	}
+	if tableRec.GetString("created_by") != e.Auth.Id {
+		return e.ForbiddenError("only the table creator may delete it", nil)
+	}
+
+	err = e.App.RunInTransaction(func(tx core.App) error {
+		hands, err := tx.FindRecordsByFilter("hands",
+			"table = {:t}", "", 0, 0, dbx.Params{"t": tableID})
+		if err != nil {
+			return fmt.Errorf("find hands: %w", err)
+		}
+		for _, h := range hands {
+			hps, err := tx.FindRecordsByFilter("hand_players",
+				"hand = {:h}", "", 0, 0, dbx.Params{"h": h.Id})
+			if err != nil {
+				return fmt.Errorf("find hand_players: %w", err)
+			}
+			for _, hp := range hps {
+				if err := tx.Delete(hp); err != nil {
+					return fmt.Errorf("delete hand_player: %w", err)
+				}
+			}
+			if err := tx.Delete(h); err != nil {
+				return fmt.Errorf("delete hand: %w", err)
+			}
+		}
+
+		seats, err := tx.FindRecordsByFilter("seats",
+			"table = {:t}", "", 0, 0, dbx.Params{"t": tableID})
+		if err != nil {
+			return fmt.Errorf("find seats: %w", err)
+		}
+		for _, s := range seats {
+			if err := tx.Delete(s); err != nil {
+				return fmt.Errorf("delete seat: %w", err)
+			}
+		}
+
+		if err := tx.Delete(tableRec); err != nil {
+			return fmt.Errorf("delete table: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return e.InternalServerError(err.Error(), err)
+	}
+	return e.JSON(200, map[string]any{"deleted": tableID})
+}
+
 // ----- Replay -----
 
 func handleReplay(e *core.RequestEvent) error {

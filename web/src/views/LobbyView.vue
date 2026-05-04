@@ -10,6 +10,7 @@ const { user } = useAuth()
 interface TableRow {
   id: string
   name: string
+  created_by: string
   buy_in: number
   small_blind: number
   big_blind: number
@@ -25,6 +26,7 @@ const newBuyIn = ref(1000)
 const newSb = ref(10)
 const newBb = ref(20)
 const creating = ref(false)
+const deletingId = ref<string | null>(null)
 
 async function load() {
   try {
@@ -62,6 +64,24 @@ async function createTable() {
 function joinTable(id: string) {
   router.push({ name: 'table', params: { id } })
 }
+
+async function deleteTable(t: TableRow) {
+  if (!user.value || t.created_by !== user.value.id) return
+  const ok = window.confirm(
+    `Delete "${t.name}"? This removes all seats, hands, and history at this table.`,
+  )
+  if (!ok) return
+  deletingId.value = t.id
+  error.value = null
+  try {
+    await pb.send(`/api/poker/tables/${t.id}/delete`, { method: 'POST' })
+    tables.value = tables.value.filter((row) => row.id !== t.id)
+  } catch (e) {
+    error.value = (e as Error).message
+  } finally {
+    deletingId.value = null
+  }
+}
 </script>
 
 <template>
@@ -80,15 +100,33 @@ function joinTable(id: string) {
       </label>
       <label>
         <span>Buy-in</span>
-        <input v-model.number="newBuyIn" type="number" min="20" />
+        <input
+          v-model.number="newBuyIn"
+          type="number"
+          inputmode="numeric"
+          pattern="[0-9]*"
+          min="20"
+        />
       </label>
       <label>
         <span>SB</span>
-        <input v-model.number="newSb" type="number" min="1" />
+        <input
+          v-model.number="newSb"
+          type="number"
+          inputmode="numeric"
+          pattern="[0-9]*"
+          min="1"
+        />
       </label>
       <label>
         <span>BB</span>
-        <input v-model.number="newBb" type="number" min="2" />
+        <input
+          v-model.number="newBb"
+          type="number"
+          inputmode="numeric"
+          pattern="[0-9]*"
+          min="2"
+        />
       </label>
       <button :disabled="creating" type="submit" class="primary">
         {{ creating ? '…' : 'create' }}
@@ -102,12 +140,22 @@ function joinTable(id: string) {
         <div class="card-head">
           <span class="name">{{ t.name }}</span>
           <span class="status" :class="t.status">{{ t.status }}</span>
+          <button
+            v-if="user && t.created_by === user.id"
+            class="del-btn"
+            :disabled="deletingId === t.id"
+            :aria-label="`delete ${t.name}`"
+            :title="`delete ${t.name}`"
+            @click.stop="deleteTable(t)"
+          >
+            {{ deletingId === t.id ? '…' : '×' }}
+          </button>
         </div>
         <div class="meta">
           <span class="pill mono">{{ t.small_blind }}/{{ t.big_blind }}</span>
           <span class="muted">buy-in {{ t.buy_in }}</span>
+          <span class="open">open →</span>
         </div>
-        <span class="open">open →</span>
       </li>
     </ul>
     <p v-else class="empty muted">No tables yet — create one to start.</p>
@@ -218,7 +266,9 @@ header {
   align-items: center;
   gap: 0.6rem;
   font-size: 0.85rem;
+  min-width: 0;
 }
+.meta .open { margin-left: auto; }
 .pill {
   display: inline-block;
   padding: 0.1rem 0.45rem;
@@ -229,13 +279,40 @@ header {
   font-size: 0.85rem;
 }
 .open {
-  align-self: flex-end;
   font-size: 0.8rem;
   color: var(--accent);
   opacity: 0;
   transition: opacity 120ms ease;
 }
 .card:hover .open { opacity: 1; }
+/* Inline delete button — sits next to the status badge in card-head so
+   it never overlaps. flex: 0 0 auto reserves its column; the name on
+   its left gets the slack via flex: 1. Hover-revealed on desktop;
+   always visible on touch (see mobile breakpoint). */
+.del-btn {
+  flex: 0 0 auto;
+  width: 1.4rem;
+  height: 1.4rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1rem;
+  line-height: 1;
+  padding: 0;
+  border: 1px solid #644;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: #d99;
+  opacity: 0;
+  transition: opacity 120ms ease, background 120ms ease, color 120ms ease;
+}
+.card:hover .del-btn,
+.del-btn:focus-visible { opacity: 0.85; }
+.del-btn:hover:not(:disabled) {
+  background: #2a1818;
+  color: #fbb;
+  opacity: 1;
+}
 
 .empty {
   text-align: center;
@@ -254,5 +331,6 @@ header {
   .grid { grid-template-columns: 1fr; }
   /* On phones the open hint doesn't trigger via :hover; show it. */
   .open { opacity: 0.8; }
+  .del-btn { opacity: 0.85; }
 }
 </style>

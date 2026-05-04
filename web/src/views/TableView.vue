@@ -12,7 +12,7 @@ const props = defineProps<{ id: string }>()
 const router = useRouter()
 const { user } = useAuth()
 const tableId = toRef(props, 'id')
-const { table, seats, hand, userBySeat, error: tableError } = useTable(tableId)
+const { table, seats, hand, userBySeat, error: tableError, reloadSeats } = useTable(tableId)
 const handId = computed(() => hand.value?.id ?? '')
 const { allHands, reload: reloadPlayerHand } = usePlayerHand(handId)
 
@@ -242,6 +242,37 @@ async function leaveTable() {
   }
 }
 
+async function foldPlayer(seatNumber: number) {
+  if (!hand.value) return
+  busy.value = true
+  error.value = null
+  try {
+    await pb.send(`/api/poker/hands/${hand.value.id}/fold-player`, {
+      method: 'POST',
+      body: { seat_number: seatNumber },
+    })
+  } catch (e) {
+    error.value = (e as Error).message
+  } finally {
+    busy.value = false
+  }
+}
+
+// Surface the force-fold button on an opponent tile when the signed-in
+// user is the dealer of the live hand and the opponent is the current
+// human actor. Bots are driven by the bot loop, so they're excluded.
+function canForceFoldSeat(seatNum: number): boolean {
+  if (!hand.value || isHandComplete.value) return false
+  if (hand.value.phase === 'showdown') return false
+  if (hand.value.current_actor_seat !== seatNum) return false
+  if (!mySeat.value) return false
+  if (mySeat.value.seat_number !== hand.value.dealer_seat) return false
+  if (mySeat.value.seat_number === seatNum) return false
+  const target = seats.value.find((s) => s.seat_number === seatNum)
+  if (!target || target.bot_personality) return false
+  return true
+}
+
 // Variant picker. Inline dropdown + Deal button — no modal. The last
 // chosen variant persists across reloads in localStorage so most starts
 // are a single click. Rule summaries live as `title` tooltips on each
@@ -332,6 +363,11 @@ async function setReady(ready: boolean) {
       method: 'POST',
       body: { ready },
     })
+    // Self-heal stale state: if a bot's auto-ready realtime push was
+    // missed (PWA backgrounded, SSE hiccup), the user would otherwise
+    // see "waiting on bots" until the next periodic resync ticks. A
+    // one-shot refetch right after the click makes it instant.
+    await reloadSeats()
   } catch (e) {
     error.value = (e as Error).message
   } finally {
@@ -541,7 +577,18 @@ watch(
           {{ currentVariant.name }}
           <span class="qmark" aria-label="variant rules">?</span>
         </span>
-        <span v-if="hand" class="phase">{{ hand.phase }}</span>
+        <div v-if="hand || isSeated" class="header-right">
+          <span v-if="hand" class="phase">{{ hand.phase }}</span>
+          <button
+            v-if="isSeated"
+            class="leave-btn"
+            :disabled="busy"
+            title="leave this table"
+            @click="leaveTable"
+          >
+            leave
+          </button>
+        </div>
       </header>
 
       <!-- Opponents grid: wrapping uniform-width tiles. Each tile is the
@@ -563,6 +610,13 @@ watch(
             <div class="opp-head">
               <UserAvatar :user="userBySeat[n]" :size="22" />
               <span class="opp-name" :title="seatName(n)">{{ seatName(n) }}</span>
+              <button
+                v-if="canForceFoldSeat(n)"
+                class="force-fold-btn"
+                :disabled="busy"
+                :title="`force-fold ${seatName(n)} (they're stalling)`"
+                @click="foldPlayer(n)"
+              >fold</button>
               <button
                 v-if="isBotSeat(n) && isSeated && (!hand || isHandComplete)"
                 class="remove-bot-btn"
@@ -613,10 +667,11 @@ watch(
         </li>
       </ol>
 
-      <!-- Board centerpiece. Flex-grows to fill remaining vertical space
-           between the opponents ribbon and the me-dock so the cards stay
-           the visual focal point. -->
-      <div class="board">
+      <!-- Board centerpiece. Holds community cards + pot, and (after a
+           hand completes) the winner readout + ready-up status. The
+           per-winner detail intentionally lives here instead of in a
+           separate banner so the eye stays on the felt. -->
+      <div class="board" :class="{ 'is-complete': isHandComplete }">
         <div class="board-cards">
           <span v-if="!hand?.community_cards?.length" class="muted">— no board yet —</span>
           <span
@@ -628,7 +683,25 @@ watch(
             {{ formatCard(c) }}
           </span>
         </div>
-        <div v-if="hand" class="pot-display">pot <strong>{{ hand.pot }}</strong></div>
+        <div v-if="hand && !isHandComplete" class="pot-display">
+          pot <strong>{{ hand.pot }}</strong>
+        </div>
+        <template v-if="isHandComplete && hand">
+          <ul class="board-winners">
+            <li v-for="w in hand.winner_seats ?? []" :key="w.seat">
+              <strong>{{ seatLabel(w.seat) }}</strong>
+              <span class="amt">+{{ w.amount }}</span>
+              <span class="class">· {{ w.class }}</span>
+            </li>
+          </ul>
+          <div class="board-ready-status muted">
+            <template v-if="!everyoneReady">
+              waiting on {{ notReadySeats.length }}
+              player{{ notReadySeats.length === 1 ? '' : 's' }}
+            </template>
+            <template v-else>all players ready</template>
+          </div>
+        </template>
       </div>
 
       <!-- Me-dock: the user's own seat, larger and persistent above the
@@ -653,6 +726,19 @@ watch(
             <span v-if="isCurrentActor(mySeat.seat_number)" class="badge actor" title="to act">▶ acting</span>
           </div>
           <div class="dock-stack">stack <strong>{{ runningStack(mySeat.seat_number) }}</strong></div>
+          <!-- Ready toggle lives in the dock head when the hand is
+               complete: same row as the stack readout so there's no
+               separate banner to scroll past. -->
+          <button
+            v-if="isHandComplete"
+            :disabled="busy"
+            class="dock-ready"
+            :class="{ ready: myReady }"
+            :title="myReady ? 'click to unready' : 'ready up for next hand'"
+            @click="setReady(!myReady)"
+          >
+            {{ myReady ? '✓ ready' : 'ready up' }}
+          </button>
         </div>
         <div class="dock-cards" v-if="hand">
           <template v-if="findHoleCardsForSeat(mySeat.seat_number).length">
@@ -669,9 +755,6 @@ watch(
             <span class="card big hidden" v-for="m in holeCardCount" :key="m">??</span>
           </template>
         </div>
-        <div v-if="winnerInfo(mySeat.seat_number)" class="dock-winner">
-          won {{ winnerInfo(mySeat.seat_number)!.amount }} · {{ winnerInfo(mySeat.seat_number)!.class }}
-        </div>
       </div>
 
       <!-- Sit / Leave / Start hand controls -->
@@ -679,13 +762,27 @@ watch(
         <template v-if="!isSeated">
           <fieldset>
             <legend>Sit down</legend>
-            <label>seat <input v-model.number="sitSeatNumber" type="number" min="0" /></label>
-            <label>buy-in <input v-model.number="sitBuyIn" type="number" /></label>
+            <label>seat
+              <input
+                v-model.number="sitSeatNumber"
+                type="number"
+                inputmode="numeric"
+                pattern="[0-9]*"
+                min="0"
+              />
+            </label>
+            <label>buy-in
+              <input
+                v-model.number="sitBuyIn"
+                type="number"
+                inputmode="numeric"
+                pattern="[0-9]*"
+              />
+            </label>
             <button :disabled="busy" @click="sitDown">sit</button>
           </fieldset>
         </template>
         <template v-else>
-          <button :disabled="busy" @click="leaveTable">leave table</button>
           <button
             v-if="canAddBot"
             :disabled="busy"
@@ -748,6 +845,8 @@ watch(
               <input
                 v-model.number="botSeatNumber"
                 type="number"
+                inputmode="numeric"
+                pattern="[0-9]*"
                 min="0"
                 :max="table.max_seats - 1"
               />
@@ -791,6 +890,8 @@ watch(
           <input
             v-model.number="betAmount"
             type="number"
+            inputmode="numeric"
+            pattern="[0-9]*"
             :min="table.big_blind"
             :placeholder="`bet ≥ ${table.big_blind}`"
           />
@@ -805,6 +906,8 @@ watch(
           <input
             v-model.number="betAmount"
             type="number"
+            inputmode="numeric"
+            pattern="[0-9]*"
             :min="minRaiseTotal"
             :placeholder="`raise to ≥ ${minRaiseTotal}`"
           />
@@ -816,27 +919,6 @@ watch(
           </button>
         </template>
         <button :disabled="busy" @click="submitAction('all_in')">all-in</button>
-      </div>
-
-      <!-- Hand-complete banner: pause to review winner + ready up -->
-      <div v-if="isHandComplete" class="complete-banner">
-        <h3>Hand complete</h3>
-        <ul class="winners">
-          <li v-for="w in hand?.winner_seats ?? []" :key="w.seat">
-            <strong>{{ seatLabel(w.seat) }}</strong> won {{ w.amount }} · {{ w.class }}
-          </li>
-        </ul>
-        <p v-if="!everyoneReady" class="muted">
-          Waiting on {{ notReadySeats.length }} player{{ notReadySeats.length === 1 ? '' : 's' }}
-          to ready up…
-        </p>
-        <p v-else class="muted">All players ready.</p>
-        <div v-if="isSeated" class="ready-controls">
-          <button v-if="!myReady" :disabled="busy" class="primary" @click="setReady(true)">
-            ready for next hand
-          </button>
-          <button v-else :disabled="busy" @click="setReady(false)">unready</button>
-        </div>
       </div>
 
       <p v-if="error" class="err">{{ error }}</p>
@@ -855,20 +937,18 @@ watch(
 </template>
 
 <style scoped>
-/* Full-viewport column layout. The page is split into compact header /
-   opponents ribbon / flex-grow board / persistent me-dock / controls /
-   action panel, so the three things you need every second of play
-   (your hole cards, the board, the action buttons) stay on screen
-   without scrolling. The .board flex:1 absorbs slack space, keeping
-   the cards big and centered regardless of seat count. */
+/* Compact column layout. Each row is content-sized — the board does NOT
+   flex-grow because that turned the felt into a giant green block on
+   phones. Instead, every section is sized to its content with tight
+   gaps and the column ends up just tall enough to hold what's there.
+   On mobile that almost always fits in one viewport without scroll. */
 .table-view {
   max-width: 50rem;
   margin: 0 auto;
   padding: 0.5rem;
-  min-height: 100dvh;
   display: flex;
   flex-direction: column;
-  gap: 0.5rem;
+  gap: 0.4rem;
 }
 header {
   display: flex;
@@ -891,10 +971,26 @@ header .meta {
   opacity: 0.75;
 }
 header .phase {
-  margin-left: auto;
   font-family: monospace;
   opacity: 0.85;
   font-size: 0.85rem;
+}
+.header-right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.leave-btn {
+  font-size: 0.8rem;
+  padding: 0.25rem 0.6rem;
+  background: transparent;
+  color: #d99;
+  border: 1px dashed #644;
+}
+.leave-btn:hover:not(:disabled) {
+  background: #2a1818;
+  color: #fbb;
 }
 
 /* Opponents grid: wrapping, uniform-width tiles. auto-fit + minmax
@@ -966,6 +1062,25 @@ header .phase {
   font-size: 0.9rem;
   line-height: 1;
   border-radius: 3px;
+}
+/* Dealer-only force-fold button. Shown when this opponent is the
+   current actor and is stalling. */
+.opponent .force-fold-btn {
+  flex: 0 0 auto;
+  padding: 0.05rem 0.35rem;
+  font-size: 0.65rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  line-height: 1.4;
+  border-radius: 3px;
+  background: transparent;
+  color: #d99;
+  border: 1px dashed #644;
+  cursor: pointer;
+}
+.opponent .force-fold-btn:hover:not(:disabled) {
+  background: #2a1818;
+  color: #fbb;
 }
 .opp-meta {
   display: flex;
@@ -1042,18 +1157,19 @@ header .phase {
   box-shadow: 0 0 0 2px #4c4;
 }
 
-/* Board: visual centerpiece. flex:1 absorbs leftover vertical space. */
+/* Board: visual centerpiece — sized to its content (cards + pot
+   readout) so it doesn't dominate phone screens. Cards stay big via
+   `.card.big`; the felt just frames them tightly. */
 .board {
-  flex: 1 1 auto;
+  flex: 0 0 auto;
   display: flex;
   flex-direction: column;
-  gap: 0.5rem;
+  gap: 0.4rem;
   align-items: center;
   justify-content: center;
-  padding: 1rem;
+  padding: 0.6rem 0.75rem;
   border: 1px solid #2a4a2a;
   border-radius: 8px;
-  min-height: 5rem;
   background: linear-gradient(180deg, #14241a 0%, #0e1a13 100%);
 }
 .board-cards {
@@ -1133,11 +1249,25 @@ header .phase {
   flex-wrap: wrap;
   justify-content: center;
 }
-.dock-winner {
-  color: #4d4;
-  font-weight: 600;
-  text-align: center;
-  font-size: 0.9rem;
+/* Ready toggle that lives in the me-dock head when the hand is
+   complete. Sits next to the stack readout so the CTA is right where
+   the eye already is — no separate banner. The "ready" variant flips
+   to a confirmed/green look. */
+.dock-ready {
+  font-size: 0.78rem;
+  padding: 0.25rem 0.6rem;
+  background: #2a5a2a;
+  color: #efe;
+  border: 1px solid #4c4;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.dock-ready.ready {
+  background: #1f3a1f;
+  color: #cfc;
+}
+.dock-ready:hover:not(:disabled) {
+  background: #3a6a3a;
 }
 
 /* Badges (shared between opponents and me-dock). */
@@ -1270,37 +1400,35 @@ fieldset input { width: 5rem; }
   padding-right: 0.25rem;
 }
 
-/* Hand-complete banner, error, log */
-.complete-banner {
-  padding: 0.6rem 0.85rem;
-  border: 1px solid #4d4;
-  border-radius: 6px;
-  background: #0f1f0f;
-  flex-shrink: 0;
+/* Post-hand readout inside the board: replaces the old complete-banner.
+   Each line: "<name> +<amount> · <hand class>". Compact font on mobile
+   so 2-3 winners fit without forcing a scroll. */
+.board.is-complete {
+  border-color: #4d4;
+  box-shadow: 0 0 0 1px rgba(76, 204, 76, 0.25);
 }
-.complete-banner h3 {
-  margin: 0 0 0.4rem;
-  color: #cfc;
-  font-size: 1rem;
-}
-.winners {
+.board-winners {
   list-style: none;
   padding: 0;
-  margin: 0 0 0.4rem;
+  margin: 0;
   display: grid;
-  gap: 0.2rem;
-  font-size: 0.9rem;
+  gap: 0.15rem;
+  font-size: 0.85rem;
+  text-align: center;
 }
-.winners strong { color: #cfc; }
-.ready-controls {
-  display: flex;
-  gap: 0.5rem;
-  margin-top: 0.4rem;
+.board-winners strong { color: #cfc; }
+.board-winners .amt {
+  color: #4d4;
+  font-weight: 600;
+  margin-left: 0.35rem;
 }
-.ready-controls .primary {
-  background: #2a5a2a;
-  color: #efe;
-  border-color: #4c4;
+.board-winners .class {
+  margin-left: 0.25rem;
+  opacity: 0.75;
+}
+.board-ready-status {
+  font-size: 0.75rem;
+  letter-spacing: 0.04em;
 }
 .err { color: #d44; }
 .log {
@@ -1308,7 +1436,12 @@ fieldset input { width: 5rem; }
   font-family: monospace;
   flex-shrink: 0;
 }
-.log ol { margin: 0.25rem 0 0 1rem; padding: 0; }
+.log ol {
+  margin: 0.25rem 0 0 1rem;
+  padding: 0;
+  max-height: 10rem;
+  overflow-y: auto;
+}
 
 .variant-tag {
   font-size: 0.85rem;
@@ -1392,54 +1525,59 @@ fieldset input { width: 5rem; }
   justify-content: flex-end;
 }
 
-/* Mobile tweaks. The whole layout is already viewport-driven — these
-   just shrink padding and font sizes so opponent tiles fit at least
-   3-up before scrolling kicks in, and the action panel stays
-   thumb-friendly. No more sticky positioning needed: the column flex
-   plus min-height: 100dvh already pin actions to the bottom. */
+/* Mobile tweaks. Goal is fit-without-scroll on a 360×640 phone. We
+   trim every section's padding/font and keep the meta inline with the
+   title (no row wrap) so the page stays compact. */
 @media (max-width: 640px) {
   .table-view {
-    padding: 0.4rem;
-    gap: 0.4rem;
+    padding: 0.3rem;
+    gap: 0.3rem;
   }
-  header h2 { font-size: 1rem; }
-  header .meta {
-    width: 100%;
-    order: 3;
-    font-size: 0.75rem;
-  }
-  header .phase { font-size: 0.8rem; }
+  header { gap: 0.3rem 0.5rem; }
+  header h2 { font-size: 0.95rem; }
+  header .meta { font-size: 0.7rem; }
+  header .phase { font-size: 0.75rem; }
+  .variant-tag { font-size: 0.75rem; padding: 0.1rem 0.4rem; }
+  .leave-btn { font-size: 0.72rem; padding: 0.18rem 0.5rem; }
 
   .opponents {
     /* Slightly smaller minimum on mobile so a 5-handed table fits two
        cleanly per row at ~360px viewport. */
     grid-template-columns: repeat(auto-fit, minmax(7rem, 1fr));
-    gap: 0.35rem;
+    gap: 0.3rem;
   }
   .opponent {
-    padding: 0.25rem 0.35rem;
-    font-size: 0.72rem;
+    padding: 0.2rem 0.3rem;
+    font-size: 0.7rem;
+    gap: 0.1rem;
   }
-  .opp-name { font-size: 0.75rem; }
-  .opp-stack { font-size: 0.78rem; }
+  .opp-name { font-size: 0.72rem; }
+  .opp-stack { font-size: 0.72rem; }
+  .opponent.empty { min-height: 2.6rem; }
 
   .board {
-    padding: 0.6rem;
-    min-height: 4rem;
+    padding: 0.4rem 0.55rem;
+    gap: 0.3rem;
   }
+  .board-cards { gap: 0.35rem; min-height: 1.9rem; }
+  .pot-display { font-size: 0.78rem; }
+  .pot-display strong { font-size: 0.95rem; }
   .card.big {
-    font-size: 1.15rem;
-    padding: 0.25rem 0.45rem;
-    min-width: 1.4rem;
+    font-size: 1rem;
+    padding: 0.2rem 0.35rem;
+    min-width: 1.2rem;
   }
 
   .me-dock {
-    padding: 0.4rem 0.5rem;
-    gap: 0.3rem;
+    padding: 0.3rem 0.45rem;
+    gap: 0.25rem;
   }
-  .dock-name { font-size: 0.9rem; }
-  .dock-stack { font-size: 0.75rem; }
-  .dock-stack strong { font-size: 0.95rem; }
+  .dock-head { gap: 0.4rem; }
+  .dock-name { font-size: 0.85rem; }
+  .dock-id .seat-num { display: none; } /* "you" indicator already comes from the blue border */
+  .dock-stack { font-size: 0.7rem; }
+  .dock-stack strong { font-size: 0.9rem; }
+  .dock-cards { gap: 0.3rem; }
 
   .controls { gap: 0.4rem; }
   fieldset {
@@ -1469,8 +1607,8 @@ fieldset input { width: 5rem; }
        full row by itself. */
     display: grid;
     grid-template-columns: 1fr 1fr;
-    gap: 0.4rem;
-    padding: 0.5rem;
+    gap: 0.35rem;
+    padding: 0.4rem 0.5rem;
   }
   .actions .your-turn {
     grid-column: 1 / -1;

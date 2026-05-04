@@ -47,7 +47,15 @@ header {
   align-items: center;
   justify-content: space-between;
   gap: 0.5rem;
-  padding: 0.5rem 1rem;
+  /* iOS PWAs with apple-mobile-web-app-status-bar-style: black-translucent
+     draw content under the status bar, so the title and right-side chips
+     would slide under the notch / Dynamic Island. Pad the top by the
+     safe-area inset so they stay tappable. Side insets handle landscape
+     notch on iPhone. */
+  padding-top: max(0.5rem, env(safe-area-inset-top));
+  padding-right: max(1rem, env(safe-area-inset-right));
+  padding-bottom: 0.5rem;
+  padding-left: max(1rem, env(safe-area-inset-left));
   border-bottom: 1px solid #333;
   position: sticky;
   top: 0;
@@ -91,11 +99,23 @@ nav {
 }
 main {
   padding: 1rem;
+  /* Side + bottom insets so content (action panel, modal sheets, lobby
+     cards) doesn't slide under the iPhone home indicator or under the
+     landscape notch. Top is handled by the sticky header. */
+  padding-right: max(1rem, env(safe-area-inset-right));
+  padding-bottom: max(1rem, env(safe-area-inset-bottom));
+  padding-left: max(1rem, env(safe-area-inset-left));
 }
 
 @media (max-width: 640px) {
   header {
-    padding: 0.4rem 0.6rem;
+    /* Same safe-area logic as desktop, just with the smaller phone
+       padding floor. The inset itself is what protects the notch — the
+       max() picks whichever is larger. */
+    padding-top: max(0.4rem, env(safe-area-inset-top));
+    padding-right: max(0.6rem, env(safe-area-inset-right));
+    padding-bottom: 0.4rem;
+    padding-left: max(0.6rem, env(safe-area-inset-left));
   }
   header h1 {
     font-size: 1rem;
@@ -110,6 +130,9 @@ main {
   }
   main {
     padding: 0.5rem;
+    padding-right: max(0.5rem, env(safe-area-inset-right));
+    padding-bottom: max(0.5rem, env(safe-area-inset-bottom));
+    padding-left: max(0.5rem, env(safe-area-inset-left));
   }
 }
 </style>

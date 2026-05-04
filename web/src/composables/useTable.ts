@@ -262,5 +262,13 @@ export function useTable(tableId: Ref<string>) {
   onMounted(() => loadAndSubscribe(tableId.value))
   onUnmounted(cleanup)
 
-  return { table, seats, hand, userBySeat, error }
+  // Expose a one-shot refresh hook so views can self-heal after actions
+   // that may race the realtime feed (e.g. clicking ready while a bot's
+   // auto-ready save is still in flight). The periodic resync above is
+   // the safety net; this is the "I want fresh state right now" knob.
+  function reloadSeats() {
+    return resync(tableId.value)
+  }
+
+  return { table, seats, hand, userBySeat, error, reloadSeats }
 }

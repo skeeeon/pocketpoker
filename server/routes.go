@@ -21,6 +21,7 @@ func RegisterRoutes(app core.App, spaFS fs.FS) {
 
 		group.POST("/tables/{id}/sit", handleSit)
 		group.POST("/tables/{id}/leave", handleLeave)
+		group.POST("/tables/{id}/delete", handleDeleteTable)
 		group.POST("/tables/{id}/add-bot", handleAddBot)
 		group.POST("/tables/{id}/remove-bot", handleRemoveBot)
 		group.POST("/tables/{id}/ready", handleReady)
