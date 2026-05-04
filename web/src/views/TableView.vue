@@ -48,13 +48,17 @@ const mySeat = computed(() =>
 
 const isSeated = computed(() => mySeat.value !== null)
 
-const myRoundCommit = computed(() => {
-  if (!hand.value || !mySeat.value) return 0
+function roundCommitForSeat(seatNum: number): number {
+  if (!hand.value) return 0
   const phase = hand.value.phase
   return (hand.value.actions ?? [])
-    .filter((a) => a.seat === mySeat.value!.seat_number && a.phase === phase)
+    .filter((a) => a.seat === seatNum && a.phase === phase)
     .reduce((sum, a) => sum + a.amount, 0)
-})
+}
+
+const myRoundCommit = computed(() =>
+  mySeat.value ? roundCommitForSeat(mySeat.value.seat_number) : 0,
+)
 
 const toCall = computed(() => {
   if (!hand.value) return 0
@@ -354,6 +358,41 @@ watchEffect(() => {
   }
 })
 
+// Pot-relative bet/raise presets. Clicking a preset fills the input;
+// submission still goes through the existing bet/raise buttons so the
+// number remains editable. Pot raise convention: total = currentBet +
+// (pot + toCall). Values clamp to legal min and to my full stack;
+// duplicates (e.g., when all clamp to all-in) are dropped.
+const betPresets = computed<{ label: string; amount: number }[]>(() => {
+  if (!hand.value || !table.value || !mySeat.value) return []
+  const pot = hand.value.pot
+  const bb = table.value.big_blind
+  const stack = runningStack(mySeat.value.seat_number)
+  let raw: { label: string; amount: number }[]
+  if (currentBet.value === 0) {
+    raw = [
+      { label: '½ pot', amount: Math.max(bb, Math.round(pot * 0.5)) },
+      { label: '¾ pot', amount: Math.max(bb, Math.round(pot * 0.75)) },
+      { label: 'pot', amount: Math.max(bb, pot) },
+    ].map((p) => ({ ...p, amount: Math.min(p.amount, stack) }))
+  } else {
+    const calling = pot + toCall.value
+    const min = minRaiseTotal.value
+    const max = myRoundCommit.value + stack
+    raw = [
+      { label: '½ pot', amount: Math.max(min, currentBet.value + Math.round(calling * 0.5)) },
+      { label: '¾ pot', amount: Math.max(min, currentBet.value + Math.round(calling * 0.75)) },
+      { label: 'pot', amount: Math.max(min, currentBet.value + calling) },
+    ].map((p) => ({ ...p, amount: Math.min(p.amount, max) }))
+  }
+  const seen = new Set<number>()
+  return raw.filter((p) => {
+    if (seen.has(p.amount)) return false
+    seen.add(p.amount)
+    return true
+  })
+})
+
 async function setReady(ready: boolean) {
   if (!table.value) return
   busy.value = true
@@ -444,7 +483,17 @@ function runningStack(seatNum: number): number {
   return s.stack - committed
 }
 
+// Folded status mid-hand can't come from hand_players: the API rule
+// hides opponents' rows until showdown for hole-card privacy, so
+// allHands only contains the user's own row during play. Derive
+// 'folded' from the public action log instead — any seat with a fold
+// action in this hand is folded for the rest of it. hand_players is
+// still the source of truth post-showdown when full statuses (active,
+// all_in, etc.) become visible.
 function statusForSeat(seatNum: number): string {
+  if (hand.value?.actions?.some((a) => a.seat === seatNum && a.type === 'fold')) {
+    return 'folded'
+  }
   const seatRec = seats.value.find((s) => s.seat_number === seatNum)
   if (!seatRec) return ''
   const hp = allHands.value.find((h) => h.seat === seatRec.id)
@@ -578,7 +627,6 @@ watch(
           <span class="qmark" aria-label="variant rules">?</span>
         </span>
         <div v-if="hand || isSeated" class="header-right">
-          <span v-if="hand" class="phase">{{ hand.phase }}</span>
           <button
             v-if="isSeated"
             class="leave-btn"
@@ -627,6 +675,13 @@ watch(
             </div>
             <div class="opp-meta">
               <span class="opp-stack" :title="`stack ${runningStack(n)}`">{{ runningStack(n) }}</span>
+              <span
+                v-if="roundCommitForSeat(n) > 0"
+                class="opp-bet"
+                :title="`bet ${roundCommitForSeat(n)} this round`"
+              >
+                <span class="chip" />{{ roundCommitForSeat(n) }}
+              </span>
               <span class="opp-badges">
                 <span v-if="isDealer(n)" class="badge dealer" title="dealer">D</span>
                 <span v-else-if="isNextDealer(n)" class="badge dealer next" title="deals next">D</span>
@@ -653,7 +708,7 @@ watch(
                 {{ formatCard(c) }}
               </span>
             </div>
-            <div v-if="statusForSeat(n) === 'folded'" class="opp-tag">folded</div>
+            <span v-if="statusForSeat(n) === 'folded'" class="fold-stamp">FOLDED</span>
             <div v-if="winnerInfo(n)" class="opp-winner" :title="winnerInfo(n)!.class">
               +{{ winnerInfo(n)!.amount }}
             </div>
@@ -672,6 +727,7 @@ watch(
            per-winner detail intentionally lives here instead of in a
            separate banner so the eye stays on the felt. -->
       <div class="board" :class="{ 'is-complete': isHandComplete }">
+        <div v-if="hand && !isHandComplete" class="board-phase">{{ hand.phase }}</div>
         <div class="board-cards">
           <span v-if="!hand?.community_cards?.length" class="muted">— no board yet —</span>
           <span
@@ -712,6 +768,10 @@ watch(
         class="me-dock"
         :class="{ 'is-current': isMyTurn, folded: statusForSeat(mySeat.seat_number) === 'folded' }"
       >
+        <span
+          v-if="statusForSeat(mySeat.seat_number) === 'folded'"
+          class="fold-stamp dock-fold-stamp"
+        >FOLDED</span>
         <div class="dock-head">
           <UserAvatar :user="userBySeat[mySeat.seat_number]" :size="34" />
           <div class="dock-id">
@@ -726,6 +786,14 @@ watch(
             <span v-if="isCurrentActor(mySeat.seat_number)" class="badge actor" title="to act">▶ acting</span>
           </div>
           <div class="dock-stack">stack <strong>{{ runningStack(mySeat.seat_number) }}</strong></div>
+          <div
+            v-if="myRoundCommit > 0"
+            class="dock-bet"
+            :title="`bet ${myRoundCommit} this round`"
+          >
+            <span class="chip" />
+            <span class="dock-bet-amt">{{ myRoundCommit }}</span>
+          </div>
           <!-- Ready toggle lives in the dock head when the hand is
                complete: same row as the stack readout so there's no
                separate banner to scroll past. -->
@@ -886,6 +954,17 @@ watch(
         <button v-else :disabled="busy" @click="submitAction('call')">
           call {{ toCall }}
         </button>
+        <div class="presets" v-if="betPresets.length">
+          <button
+            v-for="p in betPresets"
+            :key="p.label"
+            type="button"
+            class="preset-btn"
+            :disabled="busy"
+            :title="`set to ${p.amount}`"
+            @click="betAmount = p.amount"
+          >{{ p.label }}</button>
+        </div>
         <template v-if="currentBet === 0">
           <input
             v-model.number="betAmount"
@@ -970,11 +1049,6 @@ header .meta {
   font-size: 0.8rem;
   opacity: 0.75;
 }
-header .phase {
-  font-family: monospace;
-  opacity: 0.85;
-  font-size: 0.85rem;
-}
 .header-right {
   margin-left: auto;
   display: flex;
@@ -1032,12 +1106,17 @@ header .phase {
   align-items: center;
   gap: 0.1rem;
 }
+.opponent {
+  position: relative;
+}
 .opponent.is-current {
   border-color: #ee9;
   box-shadow: 0 0 0 2px #ee9, 0 0 8px -2px rgba(238, 238, 153, 0.45);
 }
-.opponent.folded {
-  opacity: 0.5;
+/* Dim every child of a folded tile EXCEPT the FOLDED stamp, so the
+   stamp itself stays at full saturation while the seat info recedes. */
+.opponent.folded > *:not(.fold-stamp) {
+  opacity: 0.45;
 }
 .opp-head {
   display: flex;
@@ -1106,10 +1185,27 @@ header .phase {
   gap: 0.15rem;
   min-width: 0;
 }
-.opp-tag {
-  font-size: 0.7rem;
-  font-style: italic;
-  opacity: 0.7;
+/* "FOLDED" stamp — diagonal red banner pinned to the center of the
+   tile. Sits above the dimmed content so it pops without dimming
+   itself. White-space:nowrap keeps the word from breaking on narrow
+   tiles. */
+.fold-stamp {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%) rotate(-12deg);
+  font-size: 0.8rem;
+  font-weight: 800;
+  letter-spacing: 0.18em;
+  color: #ffb4b4;
+  background: rgba(50, 8, 8, 0.78);
+  border: 2px solid #d44;
+  border-radius: 3px;
+  padding: 0.1rem 0.5rem;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.7);
+  pointer-events: none;
+  white-space: nowrap;
+  z-index: 2;
 }
 .opp-winner {
   color: #4d4;
@@ -1192,6 +1288,19 @@ header .phase {
   color: #ee9;
   margin-left: 0.25rem;
 }
+/* Phase chip on the felt. Replaces the prior header phase indicator so
+   the eye stays on the board when scanning what street it is. */
+.board-phase {
+  font-size: 0.65rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: #cfe7d4;
+  background: rgba(40, 70, 50, 0.55);
+  padding: 0.12rem 0.55rem;
+  border-radius: 999px;
+  border: 1px solid rgba(120, 200, 140, 0.3);
+  font-weight: 600;
+}
 
 /* Me-dock: large persistent tile right above the action panel. */
 .me-dock {
@@ -1203,12 +1312,21 @@ header .phase {
   flex-direction: column;
   gap: 0.4rem;
   flex-shrink: 0;
+  position: relative;
 }
 .me-dock.is-current {
   box-shadow: 0 0 0 2px #ee9, 0 0 12px -2px rgba(238, 238, 153, 0.5);
 }
-.me-dock.folded {
-  opacity: 0.6;
+/* Same fold treatment as opponent tiles: stamp stays bright, content
+   recedes. Larger stamp font sized for the dock's wider footprint. */
+.me-dock.folded > *:not(.fold-stamp) {
+  opacity: 0.5;
+}
+.dock-fold-stamp {
+  font-size: 1.5rem;
+  letter-spacing: 0.22em;
+  padding: 0.2rem 0.85rem;
+  border-width: 3px;
 }
 .dock-head {
   display: flex;
@@ -1270,30 +1388,97 @@ header .phase {
   background: #3a6a3a;
 }
 
-/* Badges (shared between opponents and me-dock). */
+/* Badges. Pill/chip-shaped so D/SB/BB read like physical poker tokens
+   (the dealer "button" especially) instead of generic rectangular tags.
+   Min-width keeps single-letter badges from collapsing to text-width. */
 .badge {
   display: inline-flex;
   align-items: center;
-  padding: 0.05rem 0.35rem;
+  justify-content: center;
+  min-width: 1.15rem;
+  height: 1.15rem;
+  padding: 0 0.4rem;
   background: #2a2c38;
   color: #ccc;
-  font-size: 0.65rem;
+  font-size: 0.62rem;
   font-weight: 700;
-  letter-spacing: 0.05em;
-  border-radius: 2px;
-  line-height: 1.4;
+  letter-spacing: 0.04em;
+  border-radius: 999px;
+  line-height: 1;
+  border: 1px solid rgba(0, 0, 0, 0.35);
+  box-shadow: inset 0 -1px 0 rgba(0, 0, 0, 0.25), inset 0 1px 0 rgba(255, 255, 255, 0.08);
 }
-.badge.dealer { background: #2e5d8a; color: #e6f0fa; }
+/* Classic dealer button: ivory disc, dark text. */
+.badge.dealer {
+  background: radial-gradient(circle at 35% 30%, #ffffff 0%, #ece6d0 60%, #b8ad8c 100%);
+  color: #1a1a1a;
+  border-color: #877;
+}
 .badge.dealer.next {
   background: transparent;
-  color: #87b4dc;
-  border: 1px dashed #4d7aa5;
-  padding: 0 0.25rem;
+  color: #d8d2bc;
+  border: 1px dashed #b8ad8c;
+  box-shadow: none;
 }
-.badge.sb { background: #8a6f2c; color: #fff5d6; }
-.badge.bb { background: #a35420; color: #ffe6d0; }
-.badge.actor { background: #ee9; color: #16171d; }
-.badge.ready { background: #2a5a2a; color: #cfc; }
+.badge.sb {
+  background: radial-gradient(circle at 35% 30%, #ffe680 0%, #d4a017 60%, #8a6f2c 100%);
+  color: #1a1500;
+  border-color: #6a5400;
+}
+.badge.bb {
+  background: radial-gradient(circle at 35% 30%, #ffa97a 0%, #c8521a 60%, #6e2c0a 100%);
+  color: #1a0700;
+  border-color: #5a2208;
+}
+.badge.actor {
+  background: #ee9;
+  color: #16171d;
+  border-color: #b8a82e;
+}
+.badge.ready {
+  background: #2a5a2a;
+  color: #cfc;
+  border-color: #1a3a1a;
+}
+
+/* Round-commit chip indicator. Used in opponent tiles and the me-dock
+   to show how much each player has put into the current betting round
+   — a lightweight stand-in for "chips in front of the seat" without
+   needing a true oval-table layout. */
+.chip {
+  display: inline-block;
+  width: 0.6rem;
+  height: 0.6rem;
+  border-radius: 50%;
+  background: radial-gradient(circle at 35% 30%, #ffe680 0%, #d4a017 60%, #8a6f2c 100%);
+  border: 1px solid rgba(0, 0, 0, 0.35);
+  flex-shrink: 0;
+}
+.opp-bet {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.72rem;
+  color: #ffd34d;
+  font-weight: 600;
+}
+.dock-bet {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.78rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  opacity: 0.95;
+  margin-left: 0.5rem;
+}
+.dock-bet-amt {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: #ffd34d;
+  font-weight: 700;
+  font-size: 0.95rem;
+}
 
 .muted { opacity: 0.5; }
 
@@ -1391,6 +1576,28 @@ fieldset input { width: 5rem; }
   flex-shrink: 0;
 }
 .actions input { width: 6rem; }
+/* Pot-relative bet sizing presets. Inline cluster between call/check
+   and the bet/raise input — clicking populates the input rather than
+   submitting, so the user can still tweak the number. */
+.presets {
+  display: inline-flex;
+  gap: 0.25rem;
+  align-items: center;
+}
+.preset-btn {
+  font-size: 0.7rem;
+  padding: 0.2rem 0.5rem;
+  background: #2a3a52;
+  color: #cfe;
+  border: 1px solid #3a587f;
+  border-radius: 4px;
+  cursor: pointer;
+  letter-spacing: 0.02em;
+}
+.preset-btn:hover:not(:disabled) {
+  background: #345078;
+  color: #fff;
+}
 .your-turn {
   font-size: 0.75rem;
   letter-spacing: 0.08em;
@@ -1536,7 +1743,6 @@ fieldset input { width: 5rem; }
   header { gap: 0.3rem 0.5rem; }
   header h2 { font-size: 0.95rem; }
   header .meta { font-size: 0.7rem; }
-  header .phase { font-size: 0.75rem; }
   .variant-tag { font-size: 0.75rem; padding: 0.1rem 0.4rem; }
   .leave-btn { font-size: 0.72rem; padding: 0.18rem 0.5rem; }
 
@@ -1621,6 +1827,13 @@ fieldset input { width: 5rem; }
     width: 100%;
   }
   .actions input + button { grid-column: 1 / -1; }
+  /* Presets span the full row on mobile so the three preset buttons
+     stay on one line inside their inline-flex container. */
+  .actions .presets {
+    grid-column: 1 / -1;
+    justify-content: center;
+  }
+  .actions .presets > button { width: auto; }
 
   .modal-backdrop {
     align-items: flex-end;
