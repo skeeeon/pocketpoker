@@ -171,9 +171,38 @@ func Decide(state HandState, seat int, p BotPersonality, rng *rand.Rand) (Action
 	// Threshold combines pot odds (must be paying off in expectation) and
 	// an absolute equity floor (don't call off chips on a coin flip just
 	// because the price is right). Looseness shrinks both knobs.
+	//
+	// Fair-share equity vs N random opponents averages ~1/(N+1), so the
+	// floor must scale with the live field — a 0.5-anchored floor turns
+	// every bot into a nit at full ring (e.g. 6-handed Dubai, where fair
+	// share is ~14% and even Loose Larry's old 0.29 floor was unreachable).
+	liveOpps := 0
+	for i, pl := range state.Players {
+		if i == idx || pl.Status == PlayerFolded {
+			continue
+		}
+		liveOpps++
+	}
+	fairShare := 1.0 / float64(liveOpps+1)
+	floorMult := 1.3 - p.Looseness
+	if floorMult < 0.5 {
+		floorMult = 0.5
+	}
 	threshold := potOdds * (1 - p.Looseness)
-	if floor := 0.5 - p.Looseness*0.3; floor > threshold {
+	if floor := fairShare * floorMult; floor > threshold {
 		threshold = floor
+	}
+
+	// Equity tiers for action selection, scaled by fair share so the
+	// "I'm comfortably ahead" calls still trigger multi-way. Bluff is
+	// less aggressively scaled (with a 0.20 absolute floor) so full-ring
+	// bots don't fire bluffs at every sub-fair-share holding. All three
+	// reduce to the original heads-up constants when liveOpps == 1.
+	valueBetTier := 1.1 * fairShare
+	raiseTier := 1.2 * fairShare
+	bluffTier := 0.7 * fairShare
+	if bluffTier < 0.20 {
+		bluffTier = 0.20
 	}
 
 	hasRaised := false
@@ -188,8 +217,8 @@ func Decide(state HandState, seat int, p BotPersonality, rng *rand.Rand) (Action
 	// Free option: no chips owed. Check unless we want to value-bet or bluff.
 	if toCall == 0 {
 		if !hasRaised {
-			valueBet := equity > 0.55 && rng.Float64() < p.Aggression
-			bluff := equity > 0.35 && rng.Float64() < p.BluffFreq
+			valueBet := equity > valueBetTier && rng.Float64() < p.Aggression
+			bluff := equity > bluffTier && rng.Float64() < p.BluffFreq
 			if valueBet || bluff {
 				return sizedBetOrRaise(state, seat, p, equity)
 			}
@@ -207,7 +236,7 @@ func Decide(state HandState, seat int, p BotPersonality, rng *rand.Rand) (Action
 	}
 
 	// Strong enough to continue. Raise occasionally, otherwise call.
-	if !hasRaised && equity > 0.6 && rng.Float64() < p.Aggression {
+	if !hasRaised && equity > raiseTier && rng.Float64() < p.Aggression {
 		return sizedBetOrRaise(state, seat, p, equity)
 	}
 	return ActionCall, 0
